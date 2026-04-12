@@ -30,6 +30,22 @@ The two versions must be **equivalent in content**, written naturally in each la
 - en: "Drag conversations between columns faster."
 - pt-BR: "Agora você pode arrastar conversas entre colunas mais rápido."
 
+## Mirroring upstream releases
+
+Downstream forks (e.g. `fazer-ai/chatwoot-pro`) that mirror a CE release must declare it with a blockquote at the top of each user-notes block, inside the markers. List all mirrored CE versions when there's more than one. CE releases never carry this marker.
+
+```markdown
+<!-- user-notes:en:start -->
+> Includes changes from Chatwoot fazer.ai v4.12.0-fazer-ai.47.
+...
+<!-- user-notes:en:end -->
+
+<!-- user-notes:pt-BR:start -->
+> Inclui mudanças do Chatwoot fazer.ai v4.12.0-fazer-ai.47.
+...
+<!-- user-notes:pt-BR:end -->
+```
+
 ## Audience and tone
 
 Write for an **end user, not a developer**. Readers do not read code, do not know what a PR is, and do not care about refactors.
