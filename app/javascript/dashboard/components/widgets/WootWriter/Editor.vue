@@ -843,8 +843,6 @@ onMounted(() => {
   }
 });
 
-defineExpose({ focusEditorInputField });
-
 // BUS Event to insert text or markdown into the editor at the
 // current cursor position.
 // Components using this
@@ -865,7 +863,7 @@ function insertMentionTrigger(char) {
   editorView.dispatch(tr);
 }
 
-defineExpose({ insertMentionTrigger });
+defineExpose({ focusEditorInputField, insertMentionTrigger });
 </script>
 
 <template>
