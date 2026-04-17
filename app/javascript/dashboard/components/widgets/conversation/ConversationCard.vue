@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useStore, useMapGetter } from 'dashboard/composables/store';
+import { useI18n } from 'vue-i18n';
 import { getLastMessage } from 'dashboard/helper/conversationHelper';
 import { frontendURL, conversationUrl } from 'dashboard/helper/URLHelper';
 import Avatar from 'next/avatar/Avatar.vue';
@@ -70,6 +71,7 @@ const currentChat = useMapGetter('getSelectedChat');
 const inboxesList = useMapGetter('inboxes/getInboxes');
 const activeInbox = useMapGetter('getSelectedInbox');
 const accountId = useMapGetter('getCurrentAccountId');
+const globalConfig = useMapGetter('globalConfig/get');
 
 const chatMetadata = computed(() => props.chat.meta || {});
 
@@ -89,11 +91,42 @@ const isActiveChat = computed(() => {
 
 const unreadCount = computed(() => props.chat.unread_count);
 
-const hasUnread = computed(() => unreadCount.value > 0);
+const isGroupsDisabled = computed(() => {
+  return (
+    props.chat.group_type === 'group' &&
+    !globalConfig.value.baileysWhatsappGroupsEnabled
+  );
+});
+
+const hasGroupActivity = computed(() => {
+  if (!isGroupsDisabled.value) return false;
+  const lastActivity = props.chat.last_activity_at;
+  const agentSeen = props.chat.agent_last_seen_at;
+  return lastActivity > 0 && (!agentSeen || lastActivity > agentSeen);
+});
+
+const hasUnread = computed(
+  () => unreadCount.value > 0 || hasGroupActivity.value
+);
 
 const isInboxNameVisible = computed(() => !activeInbox.value);
 
 const lastMessageInChat = computed(() => getLastMessage(props.chat));
+
+const { t } = useI18n();
+const typingUsersList = computed(() => {
+  const users = store.getters['conversationTypingStatus/getUserList'](
+    props.chat.id
+  );
+  return users.filter(u => u.type === 'contact');
+});
+const isAnyoneTyping = computed(() => typingUsersList.value.length > 0);
+const typingPreviewText = computed(() => {
+  if (!isAnyoneTyping.value) return '';
+  return typingUsersList.value.some(u => u.recording)
+    ? t('CHAT_LIST.RECORDING')
+    : t('CHAT_LIST.TYPING');
+});
 
 const voiceCallData = computed(() => ({
   status: props.chat.additional_attributes?.call_status,
@@ -128,11 +161,17 @@ const showLabelsSection = computed(() => {
   return props.chat.labels?.length > 0 || hasSlaPolicyId.value;
 });
 
+const messagePreviewPaddingClass = computed(() => {
+  return [
+    !props.compact && hasUnread.value ? 'ltr:pr-4 rtl:pl-4' : '',
+    props.compact && hasUnread.value ? 'ltr:pr-6 rtl:pl-6' : '',
+  ];
+});
+
 const messagePreviewClass = computed(() => {
   return [
     hasUnread.value ? 'font-medium text-n-slate-12' : 'text-n-slate-11',
-    !props.compact && hasUnread.value ? 'ltr:pr-4 rtl:pl-4' : '',
-    props.compact && hasUnread.value ? 'ltr:pr-6 rtl:pl-6' : '',
+    ...messagePreviewPaddingClass.value,
   ];
 });
 
@@ -336,6 +375,14 @@ const deleteConversation = () => {
         :direction="voiceCallData.direction"
         :message-preview-class="messagePreviewClass"
       />
+      <p
+        v-else-if="isAnyoneTyping"
+        key="typing-preview"
+        class="text-green-500 text-sm font-medium my-0 mx-2 leading-6 h-6 flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
+        :class="messagePreviewPaddingClass"
+      >
+        {{ typingPreviewText }}
+      </p>
       <MessagePreview
         v-else-if="lastMessageInChat"
         key="message-preview"
@@ -370,11 +417,15 @@ const deleteConversation = () => {
           />
         </span>
         <span
+          v-if="hasUnread && unreadCount > 0"
           class="shadow-lg rounded-full text-xxs font-semibold h-4 leading-4 ltr:ml-auto rtl:mr-auto mt-1 min-w-[1rem] px-1 py-0 text-center text-white bg-n-teal-9"
-          :class="hasUnread ? 'block' : 'hidden'"
         >
           {{ unreadCount > 9 ? '9+' : unreadCount }}
         </span>
+        <span
+          v-else-if="hasUnread"
+          class="shadow-lg rounded-full ltr:ml-auto rtl:mr-auto mt-1 size-2 bg-n-teal-9"
+        />
       </div>
       <CardLabels
         v-if="showLabelsSection"

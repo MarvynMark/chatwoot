@@ -6,7 +6,9 @@
 #  archived              :boolean          default(FALSE)
 #  color                 :string
 #  config                :jsonb
+#  custom_body_html      :text
 #  custom_domain         :string
+#  custom_head_html      :text
 #  header_text           :text
 #  homepage_link         :string
 #  name                  :string           not null
@@ -42,11 +44,17 @@ class Portal < ApplicationRecord
   validates :name, presence: true
   validates :slug, presence: true, uniqueness: true
   validates :custom_domain, uniqueness: true, allow_nil: true
+  validates :custom_head_html, length: { maximum: 15_000 }
+  validates :custom_body_html, length: { maximum: 15_000 }
   validate :config_json_format
 
   scope :active, -> { where(archived: false) }
 
-  CONFIG_JSON_KEYS = %w[allowed_locales default_locale draft_locales website_token].freeze
+  CONFIG_JSON_KEYS = %w[allowed_locales default_locale draft_locales website_token show_author].freeze
+
+  def show_author?
+    !ActiveModel::Type::Boolean.new.cast(config['show_author']).equal?(false)
+  end
 
   def file_base_data
     {
@@ -102,7 +110,7 @@ class Portal < ApplicationRecord
     config['default_locale'] = default_locale
     config['draft_locales'] = draft_locale_codes
     denied_keys = config.keys - CONFIG_JSON_KEYS
-    errors.add(:cofig, "in portal on #{denied_keys.join(',')} is not supported.") if denied_keys.any?
+    errors.add(:config, "in portal on #{denied_keys.join(',')} is not supported.") if denied_keys.any?
     errors.add(:config, 'default locale cannot be drafted.') if draft_locale?(default_locale)
   end
 

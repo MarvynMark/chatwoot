@@ -19,7 +19,7 @@
 #  message_signature      :text
 #  name                   :string           not null
 #  otp_backup_codes       :text
-#  otp_required_for_login :boolean          default(FALSE)
+#  otp_required_for_login :boolean          default(FALSE), not null
 #  otp_secret             :string
 #  provider               :string           default("email"), not null
 #  pubsub_token           :string
@@ -37,6 +37,7 @@
 #
 # Indexes
 #
+#  idx_users_name_unaccent_trgm           (f_unaccent((name)::text) gin_trgm_ops) USING gin
 #  index_users_on_email                   (email)
 #  index_users_on_otp_required_for_login  (otp_required_for_login)
 #  index_users_on_otp_secret              (otp_secret) UNIQUE
@@ -96,9 +97,15 @@ class User < ApplicationRecord
   has_many :participating_conversations, through: :conversation_participants, source: :conversation
 
   has_many :inbox_members, dependent: :destroy_async
+  has_many :inbox_signatures, dependent: :destroy_async
   has_many :inboxes, through: :inbox_members, source: :inbox
+  has_many :internal_chat_channel_memberships, class_name: 'InternalChat::ChannelMember', dependent: :destroy_async
+  has_many :internal_chat_channels, through: :internal_chat_channel_memberships, source: :channel
   has_many :messages, as: :sender, dependent: :nullify
   has_many :invitees, through: :account_users, class_name: 'User', foreign_key: 'inviter_id', source: :inviter, dependent: :nullify
+
+  has_many :scheduled_messages, as: :author, dependent: :nullify
+  has_many :recurring_scheduled_messages, as: :author, dependent: :nullify
 
   has_many :custom_filters, dependent: :destroy_async
   has_many :dashboard_apps, dependent: :nullify
@@ -209,6 +216,21 @@ class User < ApplicationRecord
   def postpone_email_change_until_confirmation_and_regenerate_confirmation_token
     unconfirmed_email_will_change!
     super
+  end
+
+  def signature_position
+    ui_settings&.fetch('signature_position', 'top') || 'top'
+  end
+
+  def signature_separator
+    ui_settings&.fetch('signature_separator', 'blank') || 'blank'
+  end
+
+  def signature_settings_with_defaults
+    {
+      'position' => signature_position,
+      'separator' => signature_separator
+    }
   end
 
   private

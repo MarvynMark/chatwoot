@@ -21,6 +21,7 @@ class Webhooks::Trigger
     handle_failure(e)
   rescue StandardError => e
     handle_failure(e)
+    raise CustomExceptions::Webhook::RetriableError, "Webhook request failed: #{e.message}"
   end
 
   def handle_failure(error)

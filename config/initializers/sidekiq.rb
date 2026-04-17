@@ -33,6 +33,9 @@ Sidekiq.configure_server do |config|
 end
 
 # https://github.com/ondrejbartas/sidekiq-cron
+# Reduce poll interval for second-precision cron jobs
+Sidekiq::Options[:cron_poll_interval] = 10
+
 Rails.application.reloader.to_prepare do
   # load_from_hash! upserts jobs from the YAML and removes any Redis-persisted
   # jobs that share the same source tag but are no longer in the file.

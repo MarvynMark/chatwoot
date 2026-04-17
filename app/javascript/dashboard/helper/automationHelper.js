@@ -152,6 +152,10 @@ export const getConditionOptions = ({
     message_type: messageTypeOptions,
     private_note: booleanFilterOptions,
     priority: priorityOptions,
+    group_type: [
+      { id: 'individual', name: 'Individual' },
+      { id: 'group', name: 'Group' },
+    ],
     labels: generateConditionOptions(labels, 'title'),
   };
 
@@ -159,10 +163,21 @@ export const getConditionOptions = ({
 };
 
 export const getFileName = (action, files = []) => {
-  const blobId = action.action_params[0];
+  const scheduledParams = Array.isArray(action.action_params)
+    ? action.action_params[0]
+    : action.action_params;
+  const blobId =
+    action.action_name === 'create_scheduled_message'
+      ? scheduledParams?.blob_id
+      : action.action_params?.[0];
   if (!blobId) return '';
-  if (action.action_name === 'send_attachment') {
-    const file = files.find(item => item.blob_id === blobId);
+  if (
+    action.action_name === 'send_attachment' ||
+    action.action_name === 'create_scheduled_message'
+  ) {
+    const file = files.find(
+      item => item.blob_id?.toString() === blobId.toString()
+    );
     if (file) return file.filename.toString();
   }
   return '';
@@ -286,7 +301,7 @@ export const getInputType = (
     return getCustomAttributeInputType(customAttribute.attribute_display_type);
   }
   const type = getAutomationType(automationTypes, automation, key);
-  return type.inputType;
+  return type?.inputType ?? '';
 };
 
 /**
@@ -312,7 +327,7 @@ export const getOperators = (
     }
   }
   const type = getAutomationType(automationTypes, automation, key);
-  return type.filterOperators;
+  return type?.filterOperators ?? [];
 };
 
 /**
@@ -323,9 +338,10 @@ export const getOperators = (
  * @returns {string} The custom attribute type.
  */
 export const getCustomAttributeType = (automationTypes, automation, key) => {
-  return automationTypes[automation.event_name].conditions.find(
-    i => i.key === key
-  ).customAttributeType;
+  return (
+    automationTypes[automation.event_name].conditions.find(i => i.key === key)
+      ?.customAttributeType ?? ''
+  );
 };
 
 /**
@@ -335,8 +351,12 @@ export const getCustomAttributeType = (automationTypes, automation, key) => {
  * @returns {boolean} True if the action input should be shown, false otherwise.
  */
 export const showActionInput = (automationActionTypes, action) => {
-  if (action === 'send_email_to_team' || action === 'send_message')
+  if (
+    action === 'send_email_to_team' ||
+    action === 'send_message' ||
+    action === 'create_scheduled_message'
+  )
     return false;
-  const type = automationActionTypes.find(i => i.key === action).inputType;
+  const type = automationActionTypes.find(i => i.key === action)?.inputType;
   return !!type;
 };

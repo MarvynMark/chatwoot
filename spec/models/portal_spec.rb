@@ -28,9 +28,9 @@ RSpec.describe Portal do
       end
 
       it 'Does not allow any other config than allowed_locales' do
-        portal.update(config: { 'some_other_key': 'test_value' })
+        expect(portal.update(config: { 'some_other_key': 'test_value' })).to be(false)
         expect(portal).not_to be_valid
-        expect(portal.errors.full_messages[0]).to eq('Cofig in portal on some_other_key is not supported.')
+        expect(portal.errors.full_messages[0]).to eq('Config in portal on some_other_key is not supported.')
       end
 
       it 'falls back to no drafted locales for existing portals' do
@@ -50,14 +50,14 @@ RSpec.describe Portal do
       end
 
       it 'does not allow drafting the default locale' do
-        portal.update(config: { allowed_locales: %w[en es], draft_locales: ['en'], default_locale: 'en' })
+        portal.update(config: { allowed_locales: %w[en es], draft_locales: ['en'], default_locale: 'en' }) # rubocop:disable Rails/SaveBang
 
         expect(portal).not_to be_valid
         expect(portal.errors.full_messages).to include('Config default locale cannot be drafted.')
       end
 
       it 'converts empty string to nil' do
-        portal.update(custom_domain: '')
+        portal.update!(custom_domain: '')
         expect(portal.custom_domain).to be_nil
       end
     end

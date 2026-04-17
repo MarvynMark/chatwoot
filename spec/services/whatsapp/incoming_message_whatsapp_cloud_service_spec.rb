@@ -107,6 +107,99 @@ describe Whatsapp::IncomingMessageWhatsappCloudService do
       end
     end
 
+    context 'when document attachment has filename with spaces' do
+      let(:document_params) do
+        {
+          phone_number: whatsapp_channel.phone_number,
+          object: 'whatsapp_business_account',
+          entry: [{
+            changes: [{
+              value: {
+                contacts: [{ profile: { name: 'Sojan Jose' }, wa_id: '2423423243' }],
+                messages: [{
+                  from: '2423423243',
+                  document: {
+                    id: 'b1c68f38-8734-4ad3-b4a1-ef0c10d683',
+                    mime_type: 'application/pdf',
+                    sha256: '29ed500fa64eb55fc19dc4124acb300e5dcca0f822a301ae99944db',
+                    filename: 'Sample File Ação.pdf',
+                    caption: 'Check this document'
+                  },
+                  timestamp: '1664799904', type: 'document'
+                }]
+              }
+            }]
+          }]
+        }.with_indifferent_access
+      end
+
+      it 'uses the filename from the message payload instead of Content-Disposition' do
+        stub_media_url_request
+        stub_request(:get, 'https://chatwoot-assets.local/sample.png').to_return(
+          status: 200,
+          body: File.read('spec/assets/attachment.pdf'),
+          headers: {
+            'content-type' => 'application/pdf',
+            'content-disposition' =>
+              "attachment; filename=Sample_File_Ao.pdf; filename*=utf-8''Sample%20File%20A%C3%A7%C3%A3o.pdf"
+          }
+        )
+
+        described_class.new(inbox: whatsapp_channel.inbox, params: document_params).perform
+
+        attachment = whatsapp_channel.inbox.messages.first.attachments.first
+        expect(attachment).to be_present
+        expect(attachment.file.filename.to_s).to eq('Sample File Ação.pdf')
+      end
+    end
+
+    context 'when dispatching provider events' do
+      let(:message_params) do
+        {
+          phone_number: whatsapp_channel.phone_number,
+          object: 'whatsapp_business_account',
+          entry: [{
+            changes: [{
+              field: 'messages',
+              value: {
+                contacts: [{ profile: { name: 'Sojan Jose' }, wa_id: '2423423243' }],
+                messages: [{
+                  from: '2423423243',
+                  text: { body: 'Hello' },
+                  timestamp: '1664799904', type: 'text'
+                }]
+              }
+            }]
+          }]
+        }.with_indifferent_access
+      end
+
+      before do
+        allow(Rails.configuration.dispatcher).to receive(:dispatch)
+      end
+
+      it 'dispatches provider_event_received with the webhook field as event type' do
+        described_class.new(inbox: whatsapp_channel.inbox, params: message_params).perform
+
+        expect(Rails.configuration.dispatcher).to have_received(:dispatch).with(
+          'provider.event_received',
+          anything,
+          hash_including(
+            inbox: whatsapp_channel.inbox,
+            event: 'messages',
+            payload: message_params[:entry][0][:changes][0][:value]
+          )
+        )
+      end
+
+      it 'does not dispatch when processed_params is blank' do
+        empty_params = { phone_number: whatsapp_channel.phone_number, object: 'whatsapp_business_account', entry: {} }.with_indifferent_access
+        described_class.new(inbox: whatsapp_channel.inbox, params: empty_params).perform
+
+        expect(Rails.configuration.dispatcher).not_to have_received(:dispatch).with('provider.event_received', anything, anything)
+      end
+    end
+
     context 'when message is a reply (has context)' do
       let(:reply_params) do
         {

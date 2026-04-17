@@ -1,11 +1,13 @@
-class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController
+class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController # rubocop:disable Metrics/ClassLength
   include Api::V1::InboxesHelper
   before_action :fetch_inbox, except: [:index, :create]
   before_action :fetch_agent_bot, only: [:set_agent_bot]
   before_action :validate_limit, only: [:create]
   # we are already handling the authorization in fetch inbox
-  before_action :check_authorization, except: [:show]
-
+  # rubocop:disable Rails/LexicallyScopedActionFilter -- health is defined in WhatsappHealthManagement concern
+  before_action :check_authorization, except: [:show, :health, :setup_channel_provider]
+  before_action :validate_whatsapp_cloud_channel, only: [:health]
+  # rubocop:enable Rails/LexicallyScopedActionFilter
   include Api::V1::Accounts::Concerns::WhatsappHealthManagement
 
   def index
@@ -72,9 +74,47 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController
     @inbox.channel.reset_secret!
   end
 
+  def setup_channel_provider
+    channel = @inbox.channel
+
+    unless channel.respond_to?(:setup_channel_provider)
+      render json: { error: 'Channel does not support setup' }, status: :unprocessable_entity and return
+    end
+
+    channel.setup_channel_provider
+    head :ok
+  end
+
+  def disconnect_channel_provider
+    channel = @inbox.channel
+
+    unless channel.respond_to?(:disconnect_channel_provider)
+      render json: { error: 'Channel does not support disconnect' }, status: :unprocessable_entity and return
+    end
+
+    channel.disconnect_channel_provider
+    head :ok
+  ensure
+    channel.update_provider_connection!(connection: 'close') if channel.respond_to?(:update_provider_connection!)
+  end
+
   def destroy
     ::DeleteObjectJob.perform_later(@inbox, Current.user, request.ip) if @inbox.present?
     render status: :ok, json: { message: I18n.t('messages.inbox_deletetion_response') }
+  end
+
+  def on_whatsapp
+    params.require(:phone_number)
+    phone_number = params[:phone_number]
+    channel = @inbox.channel
+
+    unless channel.respond_to?(:on_whatsapp)
+      render json: { error: 'Channel does not support whatsapp check' }, status: :unprocessable_entity and return
+    end
+
+    response = channel.on_whatsapp(phone_number)
+
+    render json: response, status: :ok
   end
 
   private
@@ -160,7 +200,8 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController
      :lock_to_single_conversation, :portal_id, :sender_name_type, :business_name,
      { csat_config: [:display_type, :message, :button_text, :language,
                      { survey_rules: [:operator, { values: [] }],
-                       template: [:name, :template_id, :friendly_name, :content_sid, :approval_sid, :created_at, :language, :status] }] }]
+                       template: [:name, :template_id, :friendly_name, :content_sid, :approval_sid,
+                                  :created_at, :linked_at, :language, :source, :status, { body_variables: {} }] }] }]
   end
 
   def permitted_params(channel_attributes = [])

@@ -8,6 +8,7 @@ import {
   computed,
   watch,
   onMounted,
+  onBeforeUnmount,
   defineEmits,
 } from 'vue';
 import { useStore } from 'vuex';
@@ -47,6 +48,7 @@ import { useConversationRequiredAttributes } from 'dashboard/composables/useConv
 
 import { emitter } from 'shared/helpers/mitt';
 
+import ConversationAPI from 'dashboard/api/inbox/conversation';
 import wootConstants from 'dashboard/constants/globals';
 import advancedFilterOptions from './widgets/conversation/advancedFilterItems';
 import filterQueryGenerator from '../helper/filterQueryGenerator.js';
@@ -93,6 +95,7 @@ provide('contextMenuElementTarget', virtualListRef);
 const activeAssigneeTab = ref(wootConstants.ASSIGNEE_TYPE.ME);
 const activeStatus = ref(wootConstants.STATUS_TYPE.OPEN);
 const activeSortBy = ref(wootConstants.SORT_BY_TYPE.LAST_ACTIVITY_AT_DESC);
+const activeGroupType = ref('');
 const showAdvancedFilters = ref(false);
 // chatsOnView is to store the chats that are currently visible on the screen,
 // which mirrors the conversationList.
@@ -275,6 +278,7 @@ const conversationFilters = computed(() => {
     labels: props.label ? [props.label] : undefined,
     teamId: props.teamId || undefined,
     conversationType: props.conversationType || undefined,
+    groupType: activeGroupType.value || undefined,
   };
 });
 
@@ -383,13 +387,14 @@ const uniqueInboxes = computed(() => {
 // ---------------------- Methods -----------------------
 function setFiltersFromUISettings() {
   const { conversations_filter_by: filterBy = {} } = uiSettings.value;
-  const { status, order_by: orderBy } = filterBy;
+  const { status, order_by: orderBy, group_type: groupType } = filterBy;
   activeStatus.value = status || wootConstants.STATUS_TYPE.OPEN;
   activeSortBy.value = Object.values(wootConstants.SORT_BY_TYPE).includes(
     orderBy
   )
     ? orderBy
     : wootConstants.SORT_BY_TYPE.LAST_ACTIVITY_AT_DESC;
+  activeGroupType.value = groupType || '';
 }
 
 function emitConversationLoaded() {
@@ -485,6 +490,10 @@ function setParamsForEditFolderModal() {
       { id: 'medium', name: t('CONVERSATION.PRIORITY.OPTIONS.MEDIUM') },
       { id: 'high', name: t('CONVERSATION.PRIORITY.OPTIONS.HIGH') },
       { id: 'urgent', name: t('CONVERSATION.PRIORITY.OPTIONS.URGENT') },
+    ],
+    group_type: [
+      { id: 'individual', name: t('GROUP.FILTER.INDIVIDUAL') },
+      { id: 'group', name: t('GROUP.FILTER.GROUP') },
     ],
     filterTypes: advancedFilterTypes.value,
     allCustomAttributes: conversationCustomAttributes.value,
@@ -627,6 +636,8 @@ function updateAssigneeTab(selectedTab) {
 function onBasicFilterChange(value, type) {
   if (type === 'status') {
     activeStatus.value = value;
+  } else if (type === 'group_type') {
+    activeGroupType.value = value;
   } else {
     activeSortBy.value = value;
   }
@@ -819,15 +830,34 @@ useEmitter('fetch_conversation_stats', () => {
   store.dispatch('conversationStats/get', conversationFilters.value);
 });
 
+let lastSubscribedIds = '';
+const subscribePresenceForTopChats = () => {
+  const ids = conversationList.value.slice(0, 10).map(c => c.id);
+  const key = ids.join(',');
+  if (!ids.length || key === lastSubscribedIds) return;
+  lastSubscribedIds = key;
+  ConversationAPI.presenceSubscribeBulk(ids).catch(() => {});
+};
+
+let presenceInterval = null;
+
 onMounted(() => {
   store.dispatch('setChatListFilters', conversationFilters.value);
   setFiltersFromUISettings();
   store.dispatch('setChatStatusFilter', activeStatus.value);
   store.dispatch('setChatSortFilter', activeSortBy.value);
+  store.dispatch('setChatGroupTypeFilter', activeGroupType.value);
   resetAndFetchData();
   if (hasActiveFolders.value) {
     store.dispatch('campaigns/get');
   }
+  presenceInterval = setInterval(subscribePresenceForTopChats, 60000);
+});
+
+watch(conversationList, subscribePresenceForTopChats);
+
+onBeforeUnmount(() => {
+  if (presenceInterval) clearInterval(presenceInterval);
 });
 
 const deleteConversationDialogRef = ref(null);

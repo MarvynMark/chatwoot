@@ -15,10 +15,12 @@ class AsyncDispatcher < BaseDispatcher
       CsatSurveyListener.instance,
       HookListener.instance,
       InstallationWebhookListener.instance,
+      InternalChatListener.instance,
       NotificationListener.instance,
       ParticipationListener.instance,
       ReportingEventListener.instance,
-      WebhookListener.instance
+      WebhookListener.instance,
+      ChannelListener.instance
     ]
   end
 end

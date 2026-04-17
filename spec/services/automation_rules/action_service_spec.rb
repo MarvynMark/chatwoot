@@ -114,7 +114,7 @@ RSpec.describe AutomationRules::ActionService do
         allow(account).to receive(:within_email_rate_limit?).and_return(true)
         allow(account).to receive(:increment_email_sent_count).and_return(true)
         rule.actions << { action_name: 'send_email_transcript', action_params: ['contact@example.com, agent@example.com,agent1@example.com'] }
-        rule.save
+        rule.save!
       end
 
       it 'will send email to transcript to action params emails' do
@@ -130,7 +130,7 @@ RSpec.describe AutomationRules::ActionService do
 
       it 'will send email to transcript to contacts' do
         rule.actions = [{ action_name: 'send_email_transcript', action_params: ['{{contact.email}}'] }]
-        rule.save
+        rule.save!
 
         mailer = double
         allow(ConversationReplyMailer).to receive(:with).and_return(mailer)
@@ -144,7 +144,7 @@ RSpec.describe AutomationRules::ActionService do
     describe '#perform with add_label action' do
       before do
         rule.actions << { action_name: 'add_label', action_params: %w[bug feature] }
-        rule.save
+        rule.save!
       end
 
       it 'will add labels to conversation' do
@@ -164,7 +164,7 @@ RSpec.describe AutomationRules::ActionService do
       before do
         conversation.add_labels(%w[bug feature support])
         rule.actions << { action_name: 'remove_label', action_params: %w[bug feature] }
-        rule.save
+        rule.save!
       end
 
       it 'will remove specified labels from conversation' do
@@ -215,6 +215,23 @@ RSpec.describe AutomationRules::ActionService do
         described_class.new(rule, account, conversation).perform
 
         expect(conversation.reload.assignee).to eq(agent)
+      end
+    end
+
+    describe '#perform with create_scheduled_message action' do
+      it 'creates scheduled message with attachment from rule files' do
+        rule.files.attach(io: Rails.root.join('spec/assets/avatar.png').open, filename: 'avatar.png', content_type: 'image/png')
+        rule.save!
+        rule.actions = [{ action_name: 'create_scheduled_message',
+                          action_params: [{ content: 'Scheduled', delay_minutes: 5, blob_id: rule.files.first.blob_id }] }]
+
+        expect { described_class.new(rule, account, conversation).perform }
+          .to change { conversation.scheduled_messages.count }.by(1)
+
+        scheduled_message = conversation.scheduled_messages.last
+        expect(scheduled_message.content).to eq('Scheduled')
+        expect(scheduled_message.author).to eq(rule)
+        expect(scheduled_message.attachment).to be_attached
       end
     end
   end

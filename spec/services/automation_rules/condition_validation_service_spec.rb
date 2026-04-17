@@ -13,7 +13,7 @@ RSpec.describe AutomationRules::ConditionValidationService do
           { 'values': ['test'], 'attribute_key': 'email', 'query_operator': 'OR', 'filter_operator': 'contains' },
           { 'values': [true], 'attribute_key': 'private_note', 'query_operator': nil, 'filter_operator': 'equal_to' }
         ]
-        rule.save
+        rule.save # rubocop:disable Rails/SaveBang
       end
 
       it 'returns true' do
@@ -26,7 +26,7 @@ RSpec.describe AutomationRules::ConditionValidationService do
         rule.conditions = [
           { 'values': ['open'], 'attribute_key': 'not-a-standard-attribute-for-sure', 'query_operator': nil, 'filter_operator': 'equal_to' }
         ]
-        rule.save
+        rule.save # rubocop:disable Rails/SaveBang
       end
 
       it 'returns false' do
@@ -39,7 +39,7 @@ RSpec.describe AutomationRules::ConditionValidationService do
         rule.conditions = [
           { 'values': ['open'], 'attribute_key': 'status', 'query_operator': nil, 'filter_operator': 'not-a-filter-operator' }
         ]
-        rule.save
+        rule.save # rubocop:disable Rails/SaveBang
       end
 
       it 'returns false' do
@@ -50,7 +50,7 @@ RSpec.describe AutomationRules::ConditionValidationService do
     context 'with wrong query operator' do
       before do
         rule.conditions = [{ 'values': ['open'], 'attribute_key': 'status', 'query_operator': 'invalid', 'filter_operator': 'attribute_changed' }]
-        rule.save
+        rule.save # rubocop:disable Rails/SaveBang
       end
 
       it 'returns false' do
@@ -63,7 +63,7 @@ RSpec.describe AutomationRules::ConditionValidationService do
         rule.conditions = [
           { 'values': ['open'], 'attribute_key': 'status', 'query_operator': nil, 'filter_operator': 'attribute_changed' }
         ]
-        rule.save
+        rule.save # rubocop:disable Rails/SaveBang
       end
 
       it 'returns true' do
@@ -88,7 +88,7 @@ RSpec.describe AutomationRules::ConditionValidationService do
             'custom_attribute_type': 'conversation_attribute'
           }
         ]
-        rule.save
+        rule.save # rubocop:disable Rails/SaveBang
       end
 
       it 'returns true' do
@@ -106,7 +106,7 @@ RSpec.describe AutomationRules::ConditionValidationService do
             'custom_attribute_type': 'conversation_attribute'
           }
         ]
-        rule.save
+        rule.save # rubocop:disable Rails/SaveBang
       end
 
       it 'returns false for missing custom attribute' do

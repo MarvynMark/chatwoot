@@ -52,6 +52,26 @@ class Inboxes extends CacheEnabledApiClient {
   resetSecret(inboxId) {
     return axios.post(`${this.url}/${inboxId}/reset_secret`);
   }
+
+  linkCSATTemplate(inboxId, template) {
+    return axios.post(`${this.url}/${inboxId}/csat_template/link`, {
+      template,
+    });
+  }
+
+  getAvailableCSATTemplates(inboxId) {
+    return axios.get(
+      `${this.url}/${inboxId}/csat_template/available_templates`
+    );
+  }
+
+  setupChannelProvider(inboxId) {
+    return axios.post(`${this.url}/${inboxId}/setup_channel_provider`);
+  }
+
+  disconnectChannelProvider(inboxId) {
+    return axios.post(`${this.url}/${inboxId}/disconnect_channel_provider`);
+  }
 }
 
 export default new Inboxes();

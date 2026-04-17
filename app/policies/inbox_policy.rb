@@ -69,4 +69,12 @@ class InboxPolicy < ApplicationPolicy
   def reset_secret?
     @account_user.administrator?
   end
+
+  def disconnect_channel_provider?
+    @account_user.administrator?
+  end
+
+  def on_whatsapp?
+    true
+  end
 end
