@@ -10,15 +10,16 @@ on:
       - main
   workflow_dispatch:
 
-env:
-  GITHUB_REPO: ghcr.io/${{ github.repository }}
-
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set lowercase image name
+        id: image
+        run: echo "name=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -38,7 +39,7 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.GITHUB_REPO }}:latest
-            ${{ env.GITHUB_REPO }}:${{ github.sha }}
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
