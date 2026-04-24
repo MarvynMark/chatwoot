@@ -161,6 +161,9 @@ baileys-api:
       - '-c'
       - 'bun manage-api-keys create user ${BAILEYS_PROVIDER_DEFAULT_API_KEY} && bun start'
     restart: always
+    networks:
+      - default
+      - coolify
     healthcheck:
       test:
         - CMD-SHELL
