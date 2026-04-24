@@ -43,3 +43,9 @@ jobs:
             ${{ steps.image.outputs.name }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Trigger Coolify deploy
+        run: |
+          curl -s -o /dev/null -w "%{http_code}" \
+            -X GET "https://coolify.softaxon.tech/api/v1/deploy?uuid=m7lxzl1kt07lcsgdq1t9828q&force=false" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}"
