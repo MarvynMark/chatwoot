@@ -141,6 +141,33 @@ services:
       interval: 20s
       timeout: 20s
       retries: 10
+      
+baileys-api:
+    image: 'ghcr.io/marvynmark/baileys-api:latest'
+    pull_policy: always
+    volumes:
+      - 'storage:/app/storage'
+    depends_on:
+      - redis
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${SERVICE_PASSWORD_REDIS}
+      - LOG_LEVEL=${LOG_LEVEL:-debug}
+      - BAILEYS_LOG_LEVEL=${BAILEYS_LOG_LEVEL:-error}
+      - BAILEYS_PROVIDER_DEFAULT_API_KEY=${BAILEYS_PROVIDER_DEFAULT_API_KEY}
+    command:
+      - sh
+      - '-c'
+      - 'bun manage-api-keys create user ${BAILEYS_PROVIDER_DEFAULT_API_KEY} && bun start'
+    restart: always
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- http://localhost:3025/status'
+      interval: 20s
+      timeout: 20s
+      retries: 10
 
 volumes:
   storage:
