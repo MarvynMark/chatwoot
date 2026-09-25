@@ -47,9 +47,6 @@ services:
           - sh
           - '-c'
           - 'bundle exec rails branding:update && if [ -n "$${BRAND_ASSETS_URL}" ]; then deployment/extract_brand_assets.sh "$${BRAND_ASSETS_URL}"; fi'
-    networks:
-      - default
-      - coolify
     healthcheck:
       test:
         - CMD-SHELL
@@ -170,9 +167,6 @@ services:
       - '-c'
       - 'bun manage-api-keys create user ${BAILEYS_PROVIDER_DEFAULT_API_KEY} && bun start'
     restart: always
-    networks:
-      - default
-      - coolify
     healthcheck:
       test:
         - CMD-SHELL
@@ -185,8 +179,3 @@ volumes:
   storage:
   postgres:
   redis:
-
-networks:
-  default:
-  coolify:
-    external: true
