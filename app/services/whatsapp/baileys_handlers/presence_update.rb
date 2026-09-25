@@ -4,9 +4,19 @@ module Whatsapp::BaileysHandlers::PresenceUpdate
   private
 
   def process_presence_update
+    return unless presence_subscribe_enabled?
+
     data = processed_params[:data]
     return if data[:id].blank? || data[:id].include?('@g.us')
 
+    dispatch_presence_events(data)
+  end
+
+  def presence_subscribe_enabled?
+    inbox.channel.provider_config&.dig('presence_subscribe')
+  end
+
+  def dispatch_presence_events(data)
     lid, phone = extract_presence_identifiers(data)
     consolidate_presence_contact(lid, phone) if lid && phone
 
@@ -18,8 +28,9 @@ module Whatsapp::BaileysHandlers::PresenceUpdate
   def extract_presence_identifiers(data)
     jid = data[:id]
     lid = extract_jid_user(jid) if jid&.include?('@lid')
-    phone = extract_jid_user(jid) if jid&.include?('@s.whatsapp.net')
-    phone ||= extract_jid_user(data[:jidAlt]) if data[:jidAlt].present?
+    # Whichever of the two addresses is a phone one, asked the same way everywhere else:
+    # a phone number is what a phone jid carries, never what a digit string looks like.
+    phone = phone_from_jid(jid) || phone_from_jid(data[:jidAlt])
     [lid, phone]
   end
 

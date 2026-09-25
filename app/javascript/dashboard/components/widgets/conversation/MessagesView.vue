@@ -7,20 +7,25 @@ import { useSnakeCase } from 'dashboard/composables/useTransformKeys';
 import { useAdmin } from 'dashboard/composables/useAdmin';
 import { useKeyboardEvents } from 'dashboard/composables/useKeyboardEvents';
 import { useAlert, usePendingAlert } from 'dashboard/composables';
+import { useContactConversationNavigation } from 'dashboard/composables/useContactConversationNavigation';
 
 // components
 import ReplyBox from './ReplyBox.vue';
 import MessageList from 'next/message/MessageList.vue';
 import ConversationLabelSuggestion from './conversation/LabelSuggestion.vue';
+import ContactConversationLink from './ContactConversationLink.vue';
 import Banner from 'dashboard/components/ui/Banner.vue';
 import Spinner from 'dashboard/components-next/spinner/Spinner.vue';
 import ResizableEditorWrapper from './ResizableEditorWrapper.vue';
+import ReferralBubble from 'dashboard/components-next/Conversation/ReferralBubble.vue';
+import ConversationHistorySync from './ConversationHistorySync.vue';
 
 // stores and apis
 import { mapGetters } from 'vuex';
 
 // mixins
 import inboxMixin, { INBOX_FEATURES } from 'shared/mixins/inboxMixin';
+import { CAPABILITIES } from 'dashboard/helper/whatsappSession';
 
 // utils
 import { emitter } from 'shared/helpers/mitt';
@@ -36,11 +41,21 @@ import {
 // constants
 import { BUS_EVENTS } from 'shared/constants/busEvents';
 import { REPLY_POLICY } from 'shared/constants/links';
-import wootConstants from 'dashboard/constants/globals';
+import wootConstants, {
+  META_RESTRICTION_STATUS_URL,
+} from 'dashboard/constants/globals';
 import { LOCAL_STORAGE_KEYS } from 'dashboard/constants/localStorage';
 import { INBOX_TYPES } from 'dashboard/helper/inbox';
 import WhatsappLinkDeviceModal from '../../../routes/dashboard/settings/inbox/components/WhatsappLinkDeviceModal.vue';
 import { isInboxAdminInGroup } from 'dashboard/helper/phoneHelper';
+import {
+  isReachoutRestricted,
+  isSendStalled,
+  reachoutRestrictionDeadline,
+  isMessageCapped,
+  isMessageCapReached,
+  messageCapQuota,
+} from 'dashboard/helper/whatsapp';
 
 export default {
   components: {
@@ -48,9 +63,12 @@ export default {
     ReplyBox,
     Banner,
     ConversationLabelSuggestion,
+    ContactConversationLink,
     Spinner,
     ResizableEditorWrapper,
     WhatsappLinkDeviceModal,
+    ReferralBubble,
+    ConversationHistorySync,
   },
   mixins: [inboxMixin],
   setup() {
@@ -79,12 +97,18 @@ export default {
       getLabelSuggestions,
     } = useLabelSuggestions();
 
+    const { olderConversation, newerConversation, buildConversationPath } =
+      useContactConversationNavigation();
+
     provide('contextMenuElementTarget', conversationPanelRef);
 
     return {
       captainTasksEnabled,
       getLabelSuggestions,
       isLabelSuggestionFeatureEnabled,
+      olderConversation,
+      newerConversation,
+      buildConversationPath,
       conversationPanelRef,
       resizableEditorWrapperRef,
       messagesViewRef,
@@ -115,7 +139,7 @@ export default {
       currentUser: 'getCurrentUser',
       listLoadingStatus: 'getAllMessagesLoaded',
       currentAccountId: 'getCurrentAccountId',
-      globalConfig: 'globalConfig/get',
+      isMetaMessageSendingDisabled: 'globalConfig/isMetaMessageSendingDisabled',
     }),
     currentInbox() {
       return this.$store.getters['inboxes/getInbox'](this.currentChat.inbox_id);
@@ -163,6 +187,9 @@ export default {
       }
       return messages;
     },
+    referralData() {
+      return this.currentChat?.additional_attributes?.referral || null;
+    },
     readMessages() {
       return getReadMessages(
         this.getMessages,
@@ -173,6 +200,34 @@ export default {
       return getUnreadMessages(
         this.getMessages,
         this.currentChat.agent_last_seen_at
+      );
+    },
+    // Offered once the thread has been read back to the beginning of what this inbox
+    // holds, which is the moment the missing history becomes visible as an absence.
+    //
+    // Two ways to be at that beginning, and the store only knows one of them.
+    // `listLoadingStatus` (its `getAllMessagesLoaded` under an older name) is set when a
+    // fetch for older messages comes back empty, so it needs a scroll to the top to ever
+    // become true -- and a thread short enough to fit on screen is never scrolled, so it
+    // would never offer this. A first page that came back short is the other way: the
+    // server sends at most MessageFinder::PAGE_LIMIT, which is 20, so fewer than that
+    // means there was never a second page to ask for.
+    canRequestOlderMessages() {
+      const exhausted = this.listLoadingStatus || this.getMessages.length < 20;
+
+      return Boolean(
+        this.currentChat?.id &&
+          this.currentChat.dataFetched &&
+          this.hasInboxCapability(CAPABILITIES.HISTORY_SYNC) &&
+          exhausted &&
+          !this.isLoadingPrevious
+      );
+    },
+    // WhatsApp answered a request for this chat saying it holds nothing older. It only
+    // ever says so in that answer, so this stays false until somebody has asked once.
+    historyExhausted() {
+      return Boolean(
+        this.currentChat?.additional_attributes?.history_exhausted
       );
     },
     shouldShowSpinner() {
@@ -196,7 +251,12 @@ export default {
         instagramInbox
       );
     },
-
+    isInstagramRestrictionBannerVisible() {
+      return this.isMetaMessageSendingDisabled && this.isAnInstagramChannel;
+    },
+    instagramRestrictionStatusUrl() {
+      return META_RESTRICTION_STATUS_URL;
+    },
     replyWindowBannerMessage() {
       if (this.isAWhatsAppChannel) {
         return this.$t('CONVERSATION.TWILIO_WHATSAPP_CAN_REPLY');
@@ -271,8 +331,10 @@ export default {
       return { incoming, outgoing };
     },
     inboxSupportsEdit() {
-      // Currently only Baileys WhatsApp channel supports message editing
-      return this.isAWhatsAppBaileysChannel;
+      return this.hasInboxCapability(CAPABILITIES.EDIT);
+    },
+    inboxSupportsReactions() {
+      return this.hasInboxCapability(CAPABILITIES.REACTIONS);
     },
     currentContact() {
       const senderId = this.currentChat?.meta?.sender?.id;
@@ -281,6 +343,21 @@ export default {
     },
     isGroupConversation() {
       return this.currentChat?.group_type === 'group';
+    },
+    // The inbox is part of the target, not only the contact. A group contact is
+    // account-scoped, so the same group can be open in two inboxes of one account, and
+    // what the panel may do there is answered per inbox. Keyed on the contact alone,
+    // switching between the two threads kept the first inbox's answer.
+    groupMembersFetchTarget() {
+      if (!this.groupContactId || !this.isGroupConversation) return null;
+      // `groups` and not `group_management`: this fetch reads the GroupMember rows the
+      // inbound path already filed, through Chatwoot's own API, and never reaches the
+      // provider. Asking for the command surface here would leave a receive-only inbox
+      // without `is_inbox_admin`, and an announcement-only group would look replyable
+      // until the server refused the message.
+      if (!this.hasInboxCapability(CAPABILITIES.GROUPS)) return null;
+
+      return `${this.groupContactId}:${this.currentChat?.inbox_id}`;
     },
     groupContactId() {
       return this.currentChat?.meta?.sender?.id || null;
@@ -297,7 +374,8 @@ export default {
       if (!this.groupContactId) return {};
       return (
         this.$store.getters['groupMembers/getGroupMembersMeta'](
-          this.groupContactId
+          this.groupContactId,
+          this.currentChat?.inbox_id
         ) || {}
       );
     },
@@ -313,25 +391,31 @@ export default {
     },
     isAnnouncementModeRestricted() {
       return (
-        this.isAWhatsAppBaileysChannel &&
+        this.isASessionWhatsAppChannel &&
         this.isGroupConversation &&
         this.currentContact?.additional_attributes?.announce === true &&
         this.isGroupMembersLoaded &&
         !this.isInboxAdminInCurrentGroup
       );
     },
+    // Read off the conversation, not off the contact: a group contact is
+    // account-scoped and the same group can be open in two inboxes of one account,
+    // where only one of them may have left. The server answers for this thread's own
+    // number.
     isGroupLeft() {
       return (
-        this.isAWhatsAppBaileysChannel &&
+        this.isASessionWhatsAppChannel &&
         this.isGroupConversation &&
-        this.currentContact?.additional_attributes?.group_left === true
+        this.currentChat?.group_left === true
       );
     },
     isGroupsDisabled() {
+      // The server already strips the group capabilities when the kill switch is off, so
+      // the absence of `groups` is what "disabled" means here — for every provider.
       return (
-        this.isAWhatsAppBaileysChannel &&
+        this.isASessionWhatsAppChannel &&
         this.isGroupConversation &&
-        !this.globalConfig.baileysWhatsappGroupsEnabled
+        !this.hasInboxCapability(CAPABILITIES.GROUPS)
       );
     },
     isSuperAdmin() {
@@ -339,6 +423,85 @@ export default {
     },
     inboxProviderConnection() {
       return this.currentInbox.provider_connection?.connection;
+    },
+    inboxReachoutLock() {
+      return this.currentInbox.provider_connection?.reachout_time_lock;
+    },
+    showSendStallWarning() {
+      return isSendStalled(
+        this.currentInbox.provider_connection?.send_stall,
+        this.inboxProviderConnection
+      );
+    },
+    providerConnectionBannerMessage() {
+      if (this.showSendStallWarning) {
+        return this.isAdmin
+          ? this.$t(
+              'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.SEND_STALL'
+            )
+          : this.$t(
+              'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.SEND_STALL_CONTACT_ADMIN'
+            );
+      }
+      return this.isAdmin
+        ? this.$t(
+            'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.NOT_CONNECTED'
+          )
+        : this.$t(
+            'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.NOT_CONNECTED_CONTACT_ADMIN'
+          );
+    },
+    // The agent's shortcut is a reconnect, and on a stall it is worse than nothing: it
+    // reaches a provider that already considers this socket live, refreshes presence, and
+    // reports success while the inbox stays mute. Only an admin has an action here.
+    providerConnectionBannerHasAction() {
+      return this.isAdmin || !this.showSendStallWarning;
+    },
+    showReachoutRestriction() {
+      return isReachoutRestricted(
+        this.inboxReachoutLock,
+        this.inboxProviderConnection
+      );
+    },
+    reachoutRestrictionMessage() {
+      const deadline = reachoutRestrictionDeadline(this.inboxReachoutLock);
+      return deadline
+        ? this.$t(
+            'CONVERSATION.INBOX.WHATSAPP_REACHOUT_RESTRICTION.RESTRICTED_UNTIL',
+            { time: deadline }
+          )
+        : this.$t(
+            'CONVERSATION.INBOX.WHATSAPP_REACHOUT_RESTRICTION.RESTRICTED'
+          );
+    },
+    inboxNewChatCap() {
+      return this.currentInbox.provider_connection?.new_chat_cap;
+    },
+    showMessageCap() {
+      return isMessageCapped(
+        this.inboxNewChatCap,
+        this.inboxProviderConnection
+      );
+    },
+    messageCapBannerScheme() {
+      return isMessageCapReached(this.inboxNewChatCap) ? 'alert' : 'warning';
+    },
+    messageCapMessage() {
+      const quota = messageCapQuota(this.inboxNewChatCap);
+      if (isMessageCapReached(this.inboxNewChatCap)) {
+        return quota
+          ? this.$t(
+              'CONVERSATION.INBOX.WHATSAPP_NEW_CHAT_CAP.CAPPED_WITH_QUOTA',
+              quota
+            )
+          : this.$t('CONVERSATION.INBOX.WHATSAPP_NEW_CHAT_CAP.CAPPED');
+      }
+      return quota
+        ? this.$t(
+            'CONVERSATION.INBOX.WHATSAPP_NEW_CHAT_CAP.WARNING_WITH_QUOTA',
+            quota
+          )
+        : this.$t('CONVERSATION.INBOX.WHATSAPP_NEW_CHAT_CAP.WARNING');
     },
   },
 
@@ -352,17 +515,17 @@ export default {
       this.messageSentSinceOpened = false;
       this.resetReplyEditorHeight();
     },
-    groupContactId: {
+    // Watches the whole condition, not just the contact. The capability arrives with the
+    // inbox, and that request can land after this component mounts, so a watcher keyed on
+    // the contact alone saw no capability, skipped the fetch and never ran again: a group
+    // thread stayed without members until the agent switched conversations.
+    groupMembersFetchTarget: {
       immediate: true,
-      handler(contactId) {
-        if (
-          contactId &&
-          this.isAWhatsAppBaileysChannel &&
-          this.isGroupConversation &&
-          !this.isGroupMembersLoaded
-        ) {
+      handler(target) {
+        if (target && !this.isGroupMembersLoaded) {
           this.$store.dispatch('groupMembers/fetch', {
-            contactId,
+            contactId: this.groupContactId,
+            inboxId: this.currentChat?.inbox_id,
           });
         }
       },
@@ -578,6 +741,150 @@ export default {
       const payload = useSnakeCase(message);
       await this.$store.dispatch('sendMessageWithData', payload);
     },
+    async handleToggleReaction({ messageId, targetSourceId, emoji }) {
+      // Backend keeps a single Message row per (target, user) and toggles it
+      // in-place. The cable echo always carries the original create's echo_id,
+      // so creating a fresh optimistic per toggle leaves the new one orphaned
+      // in the store (the cable matches the real msg id, never the new echo).
+      // Those orphans show up as "reagiu <emoji>" in the chat list preview
+      // even after the user toggles off. Update the existing entry instead.
+      const existing = this.findCurrentUserReaction(messageId, targetSourceId);
+      if (existing) {
+        await this.applyToggleOnExisting(existing, messageId, emoji);
+      } else {
+        await this.applyToggleOnNew(messageId, emoji);
+      }
+    },
+    async applyToggleOnExisting(existing, messageId, emoji) {
+      const isActive =
+        existing.content && !existing.content_attributes?.deleted;
+      const isToggleOff =
+        isActive && (emoji === '' || existing.content === emoji);
+      const newAttrs = { ...(existing.content_attributes || {}) };
+      if (isToggleOff) newAttrs.deleted = true;
+      else delete newAttrs.deleted;
+
+      const previous = {
+        content: existing.content,
+        content_attributes: existing.content_attributes,
+      };
+      this.$store.dispatch('updateMessage', {
+        ...existing,
+        content: isToggleOff ? '' : emoji,
+        content_attributes: newAttrs,
+      });
+
+      try {
+        await this.$store.dispatch('toggleMessageReaction', {
+          conversationId: this.currentChat.id,
+          messageId,
+          emoji,
+          echoId: existing.echo_id,
+        });
+      } catch (error) {
+        this.$store.dispatch('updateMessage', { ...existing, ...previous });
+        useAlert(this.$t('CONVERSATION.REACTIONS.FAILED'));
+      }
+    },
+    async applyToggleOnNew(messageId, emoji) {
+      const optimistic = this.buildOptimisticReaction(messageId, emoji);
+      this.$store.dispatch('addMessage', optimistic);
+
+      try {
+        await this.$store.dispatch('toggleMessageReaction', {
+          conversationId: this.currentChat.id,
+          messageId,
+          emoji,
+          echoId: optimistic.echo_id,
+        });
+      } catch (error) {
+        this.$store.dispatch('updateMessage', {
+          ...optimistic,
+          content_attributes: {
+            ...optimistic.content_attributes,
+            deleted: true,
+          },
+        });
+        useAlert(this.$t('CONVERSATION.REACTIONS.FAILED'));
+      }
+    },
+    findCurrentUserReaction(messageId, targetSourceId = null) {
+      const messages = this.currentChat?.messages || [];
+      const matches = messages.filter(m => {
+        if (!m.content_attributes?.is_reaction) return false;
+        // Match both in_reply_to (set by Chatwoot-originated reactions) and
+        // in_reply_to_external_id (set by WhatsApp echoes). Without the
+        // external id check, a multi-device reaction sent from the connected
+        // phone would be invisible here, and the next toggle would stack a
+        // duplicate optimistic row instead of mutating the echoed one.
+        const matchesInReplyTo =
+          m.content_attributes?.in_reply_to === messageId;
+        const matchesExternalId =
+          targetSourceId &&
+          m.content_attributes?.in_reply_to_external_id === targetSourceId;
+        if (!matchesInReplyTo && !matchesExternalId) return false;
+        // REST jbuilder doesn't surface sender_type; only the nested
+        // sender.type. ActionCable push_event_data has the top-level field.
+        // Read both so REST-loaded agent reactions match instead of stacking
+        // a duplicate optimistic row.
+        const senderType = (
+          m.sender_type ||
+          m.sender?.type ||
+          ''
+        ).toLowerCase();
+        const senderId = m.sender?.id ?? m.sender_id;
+        // Reaction created via Chatwoot UI by the current user
+        if (senderType === 'user' && senderId === this.currentUserId) {
+          return true;
+        }
+        // Multi-device echo: agent reacted from the WhatsApp mobile app on
+        // the same number connected to this inbox, so it has no agent in
+        // Chatwoot. Treat it as ours so a click toggles/removes it instead
+        // of stacking a duplicate reaction on top.
+        return m.message_type === 1 && senderId == null;
+      });
+      // Prefer active rows so we never resurrect a stale deleted echo when
+      // there is a fresher live reaction sitting next to it. created_at is
+      // second-resolution, so a sort can keep the older entry first on ties.
+      // Reduce with >= so that, all else equal, the later iteration wins —
+      // giving a deterministic "newest" pick even for two toggles in the same
+      // second.
+      const pickLatest = list =>
+        list.reduce((latest, candidate) => {
+          if (!latest) return candidate;
+          return (candidate.created_at || 0) >= (latest.created_at || 0)
+            ? candidate
+            : latest;
+        }, null);
+      const isActive = r => !!r.content && !r.content_attributes?.deleted;
+      return pickLatest(matches.filter(isActive)) || pickLatest(matches);
+    },
+    buildOptimisticReaction(messageId, emoji) {
+      // Use the echo_id as the temporary id so findPendingMessageIndex matches
+      // the real Message arriving later via ActionCable (it carries echo_id).
+      const echoId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+      return {
+        id: echoId,
+        echo_id: echoId,
+        content: emoji,
+        conversation_id: this.currentChat?.id,
+        message_type: 1,
+        content_type: 'text',
+        content_attributes: {
+          is_reaction: true,
+          in_reply_to: messageId,
+        },
+        additional_attributes: {},
+        attachments: [],
+        sender: this.currentUser,
+        sender_type: 'User',
+        sender_id: this.currentUserId,
+        private: false,
+        status: 'progress',
+        created_at: Math.floor(Date.now() / 1000),
+      };
+    },
     toggleReplyEditorSize() {
       this.resizableEditorWrapperRef?.toggleEditorExpand?.();
     },
@@ -628,7 +935,7 @@ export default {
     class="flex flex-col justify-between flex-grow h-full min-w-0 m-0"
   >
     <div ref="topBannerRef">
-      <template v-if="isAWhatsAppBaileysChannel || isAWhatsAppZapiChannel">
+      <template v-if="isASessionWhatsAppChannel">
         <WhatsappLinkDeviceModal
           v-if="showLinkDeviceModal"
           :show="showLinkDeviceModal"
@@ -636,19 +943,11 @@ export default {
           :inbox="currentInbox"
         />
         <Banner
-          v-if="inboxProviderConnection !== 'open'"
+          v-if="inboxProviderConnection !== 'open' || showSendStallWarning"
           color-scheme="alert"
           class="mt-2 mx-2 rounded-lg overflow-hidden"
-          :banner-message="
-            isAdmin
-              ? $t(
-                  'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.NOT_CONNECTED'
-                )
-              : $t(
-                  'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.NOT_CONNECTED_CONTACT_ADMIN'
-                )
-          "
-          has-action-button
+          :banner-message="providerConnectionBannerMessage"
+          :has-action-button="providerConnectionBannerHasAction"
           :action-button-label="
             isAdmin
               ? $t(
@@ -661,7 +960,27 @@ export default {
             isAdmin ? onOpenLinkDeviceModal() : onSetupProviderConnection()
           "
         />
+        <Banner
+          v-if="showReachoutRestriction"
+          color-scheme="alert"
+          class="mt-2 mx-2 rounded-lg overflow-hidden"
+          :banner-message="reachoutRestrictionMessage"
+        />
+        <Banner
+          v-if="showMessageCap"
+          :color-scheme="messageCapBannerScheme"
+          class="mt-2 mx-2 rounded-lg overflow-hidden"
+          :banner-message="messageCapMessage"
+        />
       </template>
+      <Banner
+        v-if="isInstagramRestrictionBannerVisible"
+        color-scheme="warning"
+        class="mx-2 mt-2 min-h-12 !h-auto rounded-lg"
+        :banner-message="$t('CONVERSATION.INSTAGRAM_RESTRICTION_BANNER')"
+        :href-link="instagramRestrictionStatusUrl"
+        :href-link-text="$t('CONVERSATION.INSTAGRAM_RESTRICTION_STATUS_LINK')"
+      />
       <Banner
         v-if="!currentChat.can_reply"
         color-scheme="alert"
@@ -671,7 +990,7 @@ export default {
         :href-link-text="replyWindowLinkText"
       />
       <Banner
-        v-else-if="hasDuplicateInstagramInbox"
+        v-if="hasDuplicateInstagramInbox"
         color-scheme="alert"
         class="mx-2 mt-2 overflow-hidden rounded-lg"
         :banner-message="$t('CONVERSATION.OLD_INSTAGRAM_INBOX_REPLY_BANNER')"
@@ -693,6 +1012,7 @@ export default {
         color-scheme="warning"
         class="mx-2 mt-2 overflow-hidden rounded-lg"
         :banner-message="$t('CONVERSATION.GROUPS_DISABLED_BANNER')"
+        :notice-message="$t('GENERAL_SETTINGS.SUPER_ADMIN_ONLY_NOTICE')"
         has-action-button
         :action-button-label="$t('CONVERSATION.GROUPS_DISABLED_CTA')"
         @primary-action="onOpenGroupsEnabledLink"
@@ -712,8 +1032,10 @@ export default {
       :is-an-email-channel="isAnEmailChannel"
       :inbox-supports-reply-to="inboxSupportsReplyTo"
       :inbox-supports-edit="inboxSupportsEdit"
+      :inbox-supports-reactions="inboxSupportsReactions"
       :messages="getMessages"
       @retry="handleMessageRetry"
+      @toggle-reaction="handleToggleReaction"
     >
       <template #beforeAll>
         <transition name="slide-up">
@@ -724,6 +1046,18 @@ export default {
             <Spinner v-if="shouldShowSpinner" class="text-n-brand" />
           </li>
         </transition>
+        <ConversationHistorySync
+          v-if="canRequestOlderMessages"
+          :conversation-id="currentChat.id"
+          :exhausted="historyExhausted"
+        />
+        <ContactConversationLink
+          v-if="olderConversation && listLoadingStatus"
+          direction="older"
+          :conversation="olderConversation"
+          :to="buildConversationPath(olderConversation.id)"
+        />
+        <ReferralBubble v-if="referralData" :referral="referralData" />
       </template>
       <template #unreadBadge>
         <li
@@ -743,6 +1077,12 @@ export default {
           :suggested-labels="labelSuggestions"
           :chat-labels="currentChat.labels"
           :conversation-id="currentChat.id"
+        />
+        <ContactConversationLink
+          v-if="newerConversation"
+          direction="newer"
+          :conversation="newerConversation"
+          :to="buildConversationPath(newerConversation.id)"
         />
       </template>
     </MessageList>

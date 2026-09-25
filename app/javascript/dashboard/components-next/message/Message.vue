@@ -4,6 +4,7 @@ import { useTimeoutFn } from '@vueuse/core';
 import { provideMessageContext } from './provider.js';
 import { useTrack } from 'dashboard/composables';
 import { useMapGetter } from 'dashboard/composables/store';
+import { useAccount } from 'dashboard/composables/useAccount';
 import { emitter } from 'shared/helpers/mitt';
 import { useI18n } from 'vue-i18n';
 import { useRoute, useRouter } from 'vue-router';
@@ -11,6 +12,10 @@ import { LocalStorage } from 'shared/helpers/localStorage';
 import { ACCOUNT_EVENTS } from 'dashboard/helper/AnalyticsHelper/events';
 import { LOCAL_STORAGE_KEYS } from 'dashboard/constants/localStorage';
 import { getInboxIconByType } from 'dashboard/helper/inbox';
+import {
+  canDeleteMessages,
+  getUserRole,
+} from 'dashboard/helper/permissionsHelper.js';
 import { BUS_EVENTS } from 'shared/constants/busEvents';
 import {
   MESSAGE_TYPES,
@@ -31,18 +36,23 @@ import FileBubble from './bubbles/File.vue';
 import AudioBubble from './bubbles/Audio.vue';
 import VideoBubble from './bubbles/Video.vue';
 import EmbedBubble from './bubbles/Embed.vue';
+import FallbackBubble from './bubbles/Fallback.vue';
 import InstagramStoryBubble from './bubbles/InstagramStory.vue';
 import EmailBubble from './bubbles/Email/Index.vue';
 import UnsupportedBubble from './bubbles/Unsupported.vue';
+import RichMessageBubble from './bubbles/RichMessage.vue';
 import ContactBubble from './bubbles/Contact.vue';
 import DyteBubble from './bubbles/Dyte.vue';
 import LocationBubble from './bubbles/Location.vue';
 import CSATBubble from './bubbles/CSAT.vue';
 import FormBubble from './bubbles/Form.vue';
 import VoiceCallBubble from './bubbles/VoiceCall.vue';
+import WhatsappFlowResponseBubble from './bubbles/WhatsappFlowResponse.vue';
 
 import MessageError from './MessageError.vue';
 import ContextMenu from 'dashboard/modules/conversations/components/MessageContextMenu.vue';
+import EmojiReactionPicker from './EmojiReactionPicker.vue';
+import ReactionDisplay from './ReactionDisplay.vue';
 import { useBranding } from 'shared/composables/useBranding';
 
 /**
@@ -114,6 +124,7 @@ const props = defineProps({
     validator: value => Object.values(MESSAGE_STATUS).includes(value),
   },
   attachments: { type: Array, default: () => [] },
+  call: { type: Object, default: null }, // eslint-disable-line vue/no-unused-properties
   content: { type: String, default: null },
   contentAttributes: { type: Object, default: () => ({}) },
   contentType: {
@@ -139,19 +150,39 @@ const props = defineProps({
   senderId: { type: Number, default: null },
   senderType: { type: String, default: null },
   sourceId: { type: String, default: '' }, // eslint-disable-line vue/no-unused-properties
+  reactions: { type: Array, default: () => [] },
+  inboxSupportsReactions: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(['retry']);
+const emit = defineEmits(['retry', 'toggleReaction']);
 
 const contextMenuPosition = ref({});
 const showBackgroundHighlight = ref(false);
 const showContextMenu = ref(false);
+const reactionPickerOpen = ref(false);
 const { t } = useI18n();
 const route = useRoute();
 const inboxGetter = useMapGetter('inboxes/getInbox');
 const inbox = computed(() => inboxGetter.value(props.inboxId) || {});
 const router = useRouter();
+const isOnChatwootCloud = useMapGetter('globalConfig/isOnChatwootCloud');
 const { replaceInstallationName } = useBranding();
+const { accountId: currentAccountId, currentAccount } = useAccount();
+const currentUser = useMapGetter('getCurrentUser');
+
+// Mirrors `MessagePolicy#destroy?`: hiding the option is a convenience, the
+// endpoint enforces the same rule.
+const canDeleteMessage = computed(() =>
+  canDeleteMessages({
+    userRole: getUserRole(currentUser.value, currentAccountId.value),
+    accountSettings: currentAccount.value?.settings || {},
+  })
+);
+
+const isCaptainMessage = computed(() => {
+  const senderType = props.sender?.type ?? props.senderType;
+  return senderType === SENDER_TYPES.CAPTAIN_ASSISTANT;
+});
 
 /**
  * Computes the message variant based on props
@@ -315,6 +346,10 @@ const componentToRender = computed(() => {
     if (emailInboxTypes.includes(props.messageType)) return EmailBubble;
   }
 
+  if (props.contentAttributes?.whatsappFlowResponse) {
+    return WhatsappFlowResponseBubble;
+  }
+
   if (props.contentType === CONTENT_TYPES.INPUT_CSAT) {
     return CSATBubble;
   }
@@ -354,6 +389,8 @@ const componentToRender = computed(() => {
   if (Array.isArray(props.attachments) && props.attachments.length === 1) {
     const fileType = props.attachments[0].fileType;
 
+    if (fileType === ATTACHMENT_TYPES.FALLBACK) return FallbackBubble;
+
     if (!props.content) {
       if (fileType === ATTACHMENT_TYPES.IMAGE) return ImageBubble;
       if (fileType === ATTACHMENT_TYPES.FILE) return FileBubble;
@@ -367,8 +404,14 @@ const componentToRender = computed(() => {
     if (fileType === ATTACHMENT_TYPES.CONTACT) return ContactBubble;
   }
 
+  if (props.contentAttributes?.rich) {
+    return RichMessageBubble;
+  }
+
   return TextBubble;
 });
+
+const isAudioBubble = computed(() => componentToRender.value === AudioBubble);
 
 const shouldShowContextMenu = computed(() => {
   return !props.contentAttributes?.isUnsupported;
@@ -382,6 +425,12 @@ const isMessageDeleted = computed(() => {
   return props.contentAttributes?.deleted;
 });
 
+const shouldShowWhatsappReferral = computed(
+  () =>
+    variant.value === MESSAGE_VARIANTS.USER &&
+    !!props.contentAttributes?.referral
+);
+
 const payloadForContextMenu = computed(() => {
   return {
     id: props.id,
@@ -394,6 +443,7 @@ const payloadForContextMenu = computed(() => {
 const contextMenuEnabledOptions = computed(() => {
   const hasText = !!props.content;
   const hasAttachments = !!(props.attachments && props.attachments.length > 0);
+  const hasRichContent = !!props.contentAttributes?.rich;
 
   const isOutgoing = props.messageType === MESSAGE_TYPES.OUTGOING;
   const isFailedOrProcessing =
@@ -403,15 +453,15 @@ const contextMenuEnabledOptions = computed(() => {
   return {
     copy: hasText,
     delete:
-      (hasText || hasAttachments) &&
+      canDeleteMessage.value &&
+      (hasText || hasAttachments || hasRichContent) &&
       !isFailedOrProcessing &&
       !isMessageDeleted.value,
     cannedResponse: isOutgoing && hasText && !isMessageDeleted.value,
     copyLink: !isFailedOrProcessing,
     translate: !isFailedOrProcessing && !isMessageDeleted.value && hasText,
     replyTo:
-      !props.private &&
-      props.inboxSupportsReplyTo.outgoing &&
+      (props.private || props.inboxSupportsReplyTo.outgoing) &&
       !isFailedOrProcessing,
     edit:
       isOutgoing &&
@@ -419,7 +469,72 @@ const contextMenuEnabledOptions = computed(() => {
       !isFailedOrProcessing &&
       !isMessageDeleted.value &&
       props.inboxSupportsEdit,
+    report:
+      isOnChatwootCloud.value &&
+      isCaptainMessage.value &&
+      !isMessageDeleted.value,
   };
+});
+
+const canShowReactionToolbar = computed(() => {
+  if (!isBubble.value) return false;
+  if (isMessageDeleted.value) return false;
+  if (props.contentAttributes?.isUnsupported) return false;
+  if (props.status === MESSAGE_STATUS.FAILED) return false;
+  if (props.status === MESSAGE_STATUS.PROGRESS) return false;
+  if (props.messageType === MESSAGE_TYPES.TEMPLATE) return false;
+  // Private notes are agent-only and never leave Chatwoot, so reactions on
+  // them don't depend on inbox channel capabilities or a provider source_id.
+  if (props.private) return true;
+  if (!props.inboxSupportsReactions) return false;
+  // Mirror ReactionsController#target_unreactable_error: a non-private message
+  // without a provider source_id can't be reacted to on WhatsApp, so the API
+  // would 422 if the user clicked. Hide the picker instead of a dead action.
+  if (!props.sourceId) return false;
+  return true;
+});
+
+// Short cooldown after a click so a quick double-tap (or open-pick-reopen-pick
+// on the picker) doesn't fire two POSTs against the same emoji. Watching
+// reactions is not enough — the optimistic add mutates them synchronously, so
+// we'd unblock before the human could react.
+const REACTION_COOLDOWN_MS = 500;
+const pendingEmojis = ref(new Set());
+
+const currentUserReactionEmoji = computed(() => {
+  const own = props.reactions.find(
+    r =>
+      (r.senderType === 'user' && r.senderId === props.currentUserId) ||
+      (r.messageType === 1 && r.senderId == null)
+  );
+  return own?.emoji ?? null;
+});
+
+// Track pending cooldown timers so we can clear them on unmount and avoid
+// touching `pendingEmojis` after the component is gone.
+const pendingTimeouts = new Set();
+
+function handleToggleReaction(emoji) {
+  if (pendingEmojis.value.has(emoji)) return;
+  pendingEmojis.value = new Set([...pendingEmojis.value, emoji]);
+  emit('toggleReaction', {
+    messageId: props.id,
+    targetSourceId: props.sourceId,
+    emoji,
+  });
+  const timeoutId = setTimeout(() => {
+    pendingTimeouts.delete(timeoutId);
+    if (!pendingEmojis.value.has(emoji)) return;
+    const next = new Set(pendingEmojis.value);
+    next.delete(emoji);
+    pendingEmojis.value = next;
+  }, REACTION_COOLDOWN_MS);
+  pendingTimeouts.add(timeoutId);
+}
+
+onUnmounted(() => {
+  pendingTimeouts.forEach(clearTimeout);
+  pendingTimeouts.clear();
 });
 
 const shouldRenderMessage = computed(() => {
@@ -428,8 +543,11 @@ const shouldRenderMessage = computed(() => {
   const isUnsupported = props.contentAttributes?.isUnsupported;
   const isAnIntegrationMessage =
     props.contentType === CONTENT_TYPES.INTEGRATIONS;
+  const hasWhatsappFlowResponse =
+    !!props.contentAttributes?.whatsappFlowResponse;
   const isFailedMessage = props.status === MESSAGE_STATUS.FAILED;
   const hasExternalError = !!props.contentAttributes?.externalError;
+  const hasRichContent = !!props.contentAttributes?.rich;
 
   return (
     hasAttachments ||
@@ -437,8 +555,11 @@ const shouldRenderMessage = computed(() => {
     isEmailContentType ||
     isUnsupported ||
     isAnIntegrationMessage ||
+    hasWhatsappFlowResponse ||
+    shouldShowWhatsappReferral.value ||
     isFailedMessage ||
-    hasExternalError
+    hasExternalError ||
+    hasRichContent
   );
 });
 
@@ -476,10 +597,11 @@ function handleReplyTo() {
 
 const avatarInfo = computed(() => {
   if (props.contentAttributes?.externalEcho) {
-    const { name, avatar_url, channel_type, medium } = inbox.value;
+    const { name, avatar_url, channel_type, medium, voice_enabled } =
+      inbox.value;
     const iconName = avatar_url
       ? null
-      : getInboxIconByType(channel_type, medium);
+      : getInboxIconByType(channel_type, medium, 'fill', voice_enabled);
     return {
       name: iconName ? '' : name || t('CONVERSATION.NATIVE_APP'),
       src: avatar_url || '',
@@ -616,7 +738,7 @@ provideMessageContext({
   <div
     v-if="shouldRenderMessage"
     :id="`message${props.id}`"
-    class="flex w-full mb-2 message-bubble-container"
+    class="flex w-full mb-2 message-bubble-container group"
     :data-message-id="props.id"
     :class="[
       flexOrientationClass,
@@ -672,14 +794,54 @@ provideMessageContext({
           {{ sender?.name }}
         </span>
         <div
+          class="flex min-w-0"
+          :class="{
+            'ltr:ml-8 rtl:mr-8 justify-end': orientation === ORIENTATION.RIGHT,
+            'ltr:mr-8 rtl:ml-8': orientation === ORIENTATION.LEFT,
+          }"
+        >
+          <div class="relative">
+            <Component :is="componentToRender" />
+            <div
+              v-if="canShowReactionToolbar"
+              class="absolute top-1/2 -translate-y-1/2 z-10 flex items-center gap-0.5 rounded-full border border-n-slate-6 bg-n-solid-2 shadow-sm p-0.5 transition-opacity [@media(hover:none)]:opacity-100"
+              :class="[
+                reactionPickerOpen
+                  ? 'opacity-100'
+                  : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
+                orientation === ORIENTATION.RIGHT
+                  ? 'ltr:right-full ltr:mr-2 rtl:left-full rtl:ml-2'
+                  : 'ltr:left-full ltr:ml-2 rtl:right-full rtl:mr-2',
+              ]"
+            >
+              <EmojiReactionPicker
+                :alignment="
+                  orientation === ORIENTATION.RIGHT ? 'right' : 'left'
+                "
+                :current-user-emoji="currentUserReactionEmoji"
+                @select="handleToggleReaction"
+                @update:open="value => (reactionPickerOpen = value)"
+              />
+            </div>
+          </div>
+        </div>
+        <div
+          v-if="reactions.length > 0"
           class="flex"
           :class="{
             'ltr:ml-8 rtl:mr-8 justify-end': orientation === ORIENTATION.RIGHT,
             'ltr:mr-8 rtl:ml-8': orientation === ORIENTATION.LEFT,
-            'min-w-0': variant === MESSAGE_VARIANTS.EMAIL,
           }"
         >
-          <Component :is="componentToRender" />
+          <ReactionDisplay
+            :reactions="reactions"
+            :current-user-id="currentUserId"
+            :pending-emojis="pendingEmojis"
+            :alignment="orientation === ORIENTATION.RIGHT ? 'right' : 'left'"
+            :read-only="!inboxSupportsReactions && !props.private"
+            :overlap="!isAudioBubble"
+            @toggle="handleToggleReaction"
+          />
         </div>
       </div>
       <MessageError

@@ -16,7 +16,8 @@ import ContactsBulkActionBar from '../components/ContactsBulkActionBar.vue';
 import Dialog from 'dashboard/components-next/dialog/Dialog.vue';
 import BulkActionsAPI from 'dashboard/api/bulkActions';
 
-const DEFAULT_SORT_FIELD = 'last_activity_at';
+// Only order backed by index_contacts_on_account_id_and_last_activity_at
+const DEFAULT_SORT = '-last_activity_at';
 const DEBOUNCE_DELAY = 300;
 
 const store = useStore();
@@ -41,10 +42,10 @@ const searchPageNumber = ref(1);
 const isLoadingMore = ref(false);
 
 const parseSortSettings = (sortString = '') => {
-  const hasDescending = sortString.startsWith('-');
-  const sortField = hasDescending ? sortString.slice(1) : sortString;
+  const sortValue = sortString || DEFAULT_SORT;
+  const hasDescending = sortValue.startsWith('-');
   return {
-    sort: sortField || DEFAULT_SORT_FIELD,
+    sort: hasDescending ? sortValue.slice(1) : sortValue,
     order: hasDescending ? '-' : '',
   };
 };
@@ -262,7 +263,7 @@ const searchContacts = debounce(
     updatePageParam(page, value);
     await store.dispatch('contacts/search', {
       ...getCommonFetchParams(page),
-      search: encodeURIComponent(value),
+      search: value,
       append,
     });
     searchPageNumber.value = page;
@@ -278,7 +279,7 @@ const loadMoreSearchResults = async () => {
 
   await store.dispatch('contacts/search', {
     ...getCommonFetchParams(nextPage),
-    search: encodeURIComponent(searchValue.value),
+    search: searchValue.value,
     append: true,
   });
 
@@ -351,6 +352,28 @@ const assignLabels = async labels => {
   }
 };
 
+const removeLabels = async labels => {
+  if (!labels.length || !selectedContactIds.value.length) {
+    return;
+  }
+
+  isBulkActionLoading.value = true;
+  try {
+    await BulkActionsAPI.create({
+      type: 'Contact',
+      ids: selectedContactIds.value,
+      labels: { remove: labels },
+    });
+    useAlert(t('CONTACTS_BULK_ACTIONS.REMOVE_LABELS_SUCCESS'));
+    clearSelection();
+    await fetchContactsBasedOnContext(pageNumber.value);
+  } catch (error) {
+    useAlert(t('CONTACTS_BULK_ACTIONS.REMOVE_LABELS_FAILED'));
+  } finally {
+    isBulkActionLoading.value = false;
+  }
+};
+
 const deleteContacts = async () => {
   if (!selectedContactIds.value.length) {
     return;
@@ -404,7 +427,13 @@ const handleSort = async ({ sort, order }) => {
 
 const createContact = async contact => {
   await store.dispatch('contacts/create', contact);
+  await fetchContactsBasedOnContext(pageNumber.value, {
+    clearSelection: false,
+  });
 };
+
+const onContactCreated = () =>
+  fetchContactsBasedOnContext(pageNumber.value, { clearSelection: false });
 
 watch(hasSelection, value => {
   if (!value) {
@@ -497,6 +526,7 @@ onMounted(async () => {
       @apply-filter="fetchSavedOrAppliedFilteredContact"
       @clear-filters="fetchContacts"
       @load-more="loadMoreSearchResults"
+      @contact-created="onContactCreated"
     >
       <div
         v-if="isFetchingList && !(isSearchView && hasContacts)"
@@ -514,6 +544,7 @@ onMounted(async () => {
           @toggle-all="toggleSelectAll"
           @clear-selection="clearSelection"
           @assign-labels="assignLabels"
+          @remove-labels="removeLabels"
           @delete-selected="openBulkDeleteDialog"
         />
         <ContactEmptyState

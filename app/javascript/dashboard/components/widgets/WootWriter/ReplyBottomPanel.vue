@@ -7,8 +7,8 @@ import * as ActiveStorage from 'activestorage';
 import inboxMixin from 'shared/mixins/inboxMixin';
 import { FEATURE_FLAGS } from 'dashboard/featureFlags';
 import { getAllowedFileTypesByChannel } from '@chatwoot/utils';
-import { ALLOWED_FILE_TYPES } from 'shared/constants/messages';
 import VideoCallButton from '../VideoCallButton.vue';
+import RequestContactInfoButton from '../RequestContactInfoButton.vue';
 import { INBOX_TYPES } from 'dashboard/helper/inbox';
 import { mapGetters } from 'vuex';
 import NextButton from 'dashboard/components-next/button/Button.vue';
@@ -27,6 +27,7 @@ export default {
     DropdownBody,
     DropdownSection,
     DropdownItem,
+    RequestContactInfoButton,
   },
   mixins: [inboxMixin],
   props: {
@@ -149,6 +150,7 @@ export default {
     'selectContentTemplate',
     'toggleQuotedReply',
     'scheduleMessage',
+    'requestContactInfoTemplate',
   ],
   setup(props) {
     const { setSignatureFlagForInbox, fetchSignatureFlagFromUISettings } =
@@ -183,11 +185,6 @@ export default {
       uploadRef,
     };
   },
-  data() {
-    return {
-      ALLOWED_FILE_TYPES,
-    };
-  },
   computed: {
     ...mapGetters({
       accountId: 'getCurrentAccountId',
@@ -205,7 +202,12 @@ export default {
     },
     showAudioRecorderButton() {
       if (this.isEditorDisabled) return false;
-      if (this.isALineChannel || this.isATiktokChannel) {
+      // These channels can't carry a voice message, but a private note isn't
+      // going anywhere near them.
+      if (
+        (this.isALineChannel || this.isATiktokChannel) &&
+        !this.isOnPrivateNote
+      ) {
         return false;
       }
       // Disable audio recorder for safari browser as recording is not supported
@@ -229,13 +231,11 @@ export default {
       return this.conversationType === 'instagram_direct_message';
     },
     allowedFileTypes() {
-      // Use default file types for private notes
       if (this.isOnPrivateNote) {
-        return this.ALLOWED_FILE_TYPES;
+        return getAllowedFileTypesByChannel();
       }
 
       let channelType = this.channelType || this.inbox?.channel_type;
-
       if (this.isAnInstagramChannel || this.isInstagramDM) {
         channelType = INBOX_TYPES.INSTAGRAM;
       }
@@ -386,6 +386,10 @@ export default {
         sm
         @click="$emit('selectWhatsappTemplate')"
       />
+      <RequestContactInfoButton
+        v-if="!isOnPrivateNote"
+        @request-template="$emit('requestContactInfoTemplate')"
+      />
       <NextButton
         v-if="enableContentTemplates"
         v-tooltip.top-end="'Content Templates'"
@@ -482,7 +486,7 @@ export default {
   @apply flex;
 }
 
-::v-deep .file-uploads {
+:deep(.file-uploads) {
   label {
     @apply cursor-pointer;
   }

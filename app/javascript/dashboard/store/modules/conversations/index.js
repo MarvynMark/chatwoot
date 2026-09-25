@@ -1,7 +1,7 @@
 import types from '../../mutation-types';
 import getters, { getSelectedChatConversation } from './getters';
 import actions from './actions';
-import { findPendingMessageIndex } from './helpers';
+import { findPendingMessageIndex, isStaleConversation } from './helpers';
 import { MESSAGE_STATUS } from 'shared/constants/messages';
 import wootConstants from 'dashboard/constants/globals';
 import { BUS_EVENTS } from '../../../../shared/constants/busEvents';
@@ -18,6 +18,7 @@ const state = {
   currentInbox: null,
   selectedChatId: null,
   appliedFilters: [],
+  appliedFiltersSortBy: null,
   contextMenuChatId: null,
   conversationParticipants: [],
   conversationLastSeen: null,
@@ -29,6 +30,16 @@ const state = {
 const getConversationById = _state => conversationId => {
   return _state.allConversations.find(c => c.id === conversationId);
 };
+
+const preserveConversationMessageState = (
+  conversation,
+  existingConversation
+) => ({
+  ...conversation,
+  allMessagesLoaded: existingConversation.allMessagesLoaded,
+  messages: existingConversation.messages,
+  dataFetched: existingConversation.dataFetched,
+});
 
 // mutations
 export const mutations = {
@@ -50,15 +61,32 @@ export const mutations = {
         // If the conversation is already in the list and selectedChatId is the same,
         // replace all data except the messages array, attachments, dataFetched, allMessagesLoaded
         const existingConversation = newAllConversations[indexInCurrentList];
-        newAllConversations[indexInCurrentList] = {
-          ...conversation,
-          allMessagesLoaded: existingConversation.allMessagesLoaded,
-          messages: existingConversation.messages,
-          dataFetched: existingConversation.dataFetched,
-        };
+        newAllConversations[indexInCurrentList] =
+          preserveConversationMessageState(conversation, existingConversation);
       }
     });
     _state.allConversations = newAllConversations;
+  },
+  [types.REPLACE_CONVERSATION_LIST](_state, conversationList) {
+    const selectedConversation = getConversationById(_state)(
+      _state.selectedChatId
+    );
+    const replacementList = [...conversationList];
+    if (selectedConversation) {
+      const selectedConversationIndex = replacementList.findIndex(
+        conversation => conversation.id === selectedConversation.id
+      );
+      if (selectedConversationIndex === -1) {
+        replacementList.push(selectedConversation);
+      } else {
+        replacementList[selectedConversationIndex] =
+          preserveConversationMessageState(
+            replacementList[selectedConversationIndex],
+            selectedConversation
+          );
+      }
+    }
+    _state.allConversations = replacementList;
   },
   [types.EMPTY_ALL_CONVERSATION](_state) {
     _state.allConversations = [];
@@ -84,7 +112,13 @@ export const mutations = {
   [types.SET_PREVIOUS_CONVERSATIONS](_state, { id, data }) {
     if (data.length) {
       const [chat] = _state.allConversations.filter(c => c.id === id);
-      chat.messages.unshift(...data);
+      const messageIds = new Set(chat.messages.map(message => message.id));
+      const newMessages = data.filter(message => {
+        if (messageIds.has(message.id)) return false;
+        messageIds.add(message.id);
+        return true;
+      });
+      chat.messages.unshift(...newMessages);
     }
   },
   [types.SET_ALL_ATTACHMENTS](_state, { id, data }) {
@@ -109,10 +143,13 @@ export const mutations = {
     }
   },
 
-  [types.ASSIGN_AGENT](_state, { conversationId, assignee }) {
+  [types.ASSIGN_AGENT](_state, { conversationId, assignee, assigneeType }) {
     const chat = getConversationById(_state)(conversationId);
     if (chat) {
       chat.meta.assignee = assignee;
+      const inferredAssigneeType = assignee ? 'User' : null;
+      chat.meta.assignee_type =
+        assigneeType === undefined ? inferredAssigneeType : assigneeType;
     }
   },
 
@@ -216,13 +253,29 @@ export const mutations = {
 
     const pendingMessageIndex = findPendingMessageIndex(chat, message);
     if (pendingMessageIndex !== -1) {
+      // MESSAGE_UPDATED cables can arrive out of order when the user toggles a
+      // reaction quickly: each Sidekiq job reads the message at run time, so a
+      // late-arriving cable for an older state would clobber the fresher one.
+      // Drop updates that are older than what we already have.
+      const existing = chat.messages[pendingMessageIndex];
+      const incomingTs = Date.parse(message.updated_at);
+      const existingTs = Date.parse(existing?.updated_at);
+      const hasIncomingTs = Number.isFinite(incomingTs);
+      const hasExistingTs = Number.isFinite(existingTs);
+      // If the incoming timestamp is unparseable, treat it as stale so a
+      // malformed cable can't clobber the local row.
+      if (hasExistingTs && (!hasIncomingTs || incomingTs < existingTs)) return;
       chat.messages[pendingMessageIndex] = message;
     } else {
       chat.messages.push(message);
       chat.timestamp = message.created_at;
       const { conversation: { unread_count: unreadCount = 0 } = {} } = message;
       chat.unread_count = unreadCount;
-      if (selectedChatId === conversationId) {
+      // Reactions render as chips on their parent bubble, not as standalone
+      // rows, so jumping the viewport to the bottom on every toggle would
+      // yank the user away from whatever older message they reacted to.
+      const isReaction = message.content_attributes?.is_reaction === true;
+      if (selectedChatId === conversationId && !isReaction) {
         emitter.emit(BUS_EVENTS.SCROLL_TO_MESSAGE);
       }
     }
@@ -241,6 +294,16 @@ export const mutations = {
     );
   },
 
+  // Drops copies the server no longer lists in the tab they were shown under. The counterpart to
+  // SET_ALL_CONVERSATION, which only ever adds or replaces: a conversation that leaves a tab stops
+  // being sent to it, so nothing else would ever take it off the list.
+  [types.REMOVE_CONVERSATIONS](_state, conversationIds) {
+    const idsToRemove = new Set(conversationIds);
+    _state.allConversations = _state.allConversations.filter(
+      c => !idsToRemove.has(c.id)
+    );
+  },
+
   [types.UPDATE_CONVERSATION](_state, conversation) {
     const { allConversations } = _state;
     const index = allConversations.findIndex(c => c.id === conversation.id);
@@ -249,13 +312,22 @@ export const mutations = {
       const selectedConversation = allConversations[index];
 
       // ignore out of order events
-      if (conversation.updated_at < selectedConversation.updated_at) {
-        return;
-      }
+      if (isStaleConversation(conversation, selectedConversation)) return;
 
-      const { messages, ...updates } = conversation;
+      const {
+        messages,
+        event_metadata: eventMetadata,
+        ...updates
+      } = conversation;
       allConversations[index] = { ...selectedConversation, ...updates };
-      if (_state.selectedChatId === conversation.id) {
+      // The reactions controller dispatches CONVERSATION_UPDATED solely to
+      // refresh the chat list preview after a toggle (add/replace/remove); the
+      // open conversation should stay put. The backend tags the broadcast with
+      // `event_metadata.source = 'reaction_toggle'` so we can skip scroll
+      // unconditionally — heuristics on `last_non_activity_message` miss the
+      // case where newer non-reaction messages exist after the reacted target.
+      const isReactionUpdate = eventMetadata?.source === 'reaction_toggle';
+      if (_state.selectedChatId === conversation.id && !isReactionUpdate) {
         emitter.emit(BUS_EVENTS.SCROLL_TO_MESSAGE);
       }
     } else {
@@ -312,34 +384,21 @@ export const mutations = {
     }
   },
 
-  [types.UPDATE_CONVERSATION_CALL_STATUS](
+  [types.UPDATE_MESSAGE_CALL_STATUS](
     _state,
-    { conversationId, callStatus }
+    { conversationId, callStatus, callSid }
   ) {
     const chat = getConversationById(_state)(conversationId);
     if (!chat) return;
 
-    chat.additional_attributes = {
-      ...chat.additional_attributes,
-      call_status: callStatus,
-    };
-  },
-
-  [types.UPDATE_MESSAGE_CALL_STATUS](_state, { conversationId, callStatus }) {
-    const chat = getConversationById(_state)(conversationId);
-    if (!chat) return;
-
-    const lastCall = (chat.messages || []).findLast(
-      m => m.content_type === CONTENT_TYPES.VOICE_CALL
+    const message = (chat.messages || []).find(
+      m =>
+        m.content_type === CONTENT_TYPES.VOICE_CALL &&
+        m.call?.provider_call_id === callSid
     );
+    if (!message?.call) return;
 
-    if (!lastCall) return;
-
-    lastCall.content_attributes ??= {};
-    lastCall.content_attributes.data = {
-      ...lastCall.content_attributes.data,
-      status: callStatus,
-    };
+    message.call = { ...message.call, status: callStatus };
   },
 
   [types.SET_ACTIVE_INBOX](_state, inboxId) {
@@ -364,8 +423,13 @@ export const mutations = {
     _state.appliedFilters = data;
   },
 
+  [types.SET_CONVERSATION_FILTERS_SORT](_state, sortBy) {
+    _state.appliedFiltersSortBy = sortBy;
+  },
+
   [types.CLEAR_CONVERSATION_FILTERS](_state) {
     _state.appliedFilters = [];
+    _state.appliedFiltersSortBy = null;
   },
 
   [types.SET_LAST_MESSAGE_ID_IN_SYNC_CONVERSATION](

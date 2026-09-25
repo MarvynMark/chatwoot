@@ -10,8 +10,10 @@ import NextButton from 'dashboard/components-next/button/Button.vue';
 
 const props = defineProps({
   pageTitle: { type: String, required: true },
+  contactFilter: { type: Object, default: null },
   hasAppliedFilters: { type: Boolean, required: true },
   hasActiveFolders: { type: Boolean, required: true },
+  canManageActiveFolder: { type: Boolean, default: true },
   activeStatus: { type: String, required: true },
   isOnExpandedLayout: { type: Boolean, required: true },
   conversationStats: { type: Object, required: true },
@@ -39,6 +41,20 @@ const hasAppliedFiltersOrActiveFolders = computed(() => {
 const allCount = computed(() => props.conversationStats?.allCount || 0);
 const formattedAllCount = computed(() => formatNumber(allCount.value));
 
+// While filters narrow the list, the header names it and the back button exits.
+const showFilterScope = computed(
+  () => props.hasAppliedFilters && !props.hasActiveFolders
+);
+
+// The contact scope is set from the contact panel; it is exited, not edited.
+const isContactScoped = computed(
+  () => showFilterScope.value && !!props.contactFilter
+);
+
+const title = computed(
+  () => (isContactScoped.value && props.contactFilter.name) || props.pageTitle
+);
+
 const toggleConversationLayout = () => {
   const { LAYOUT_TYPES } = wootConstants;
   const {
@@ -63,11 +79,19 @@ const toggleConversationLayout = () => {
     }"
   >
     <div class="flex items-center justify-center min-w-0">
-      <h1
-        class="text-base font-medium truncate text-n-slate-12"
-        :title="pageTitle"
-      >
-        {{ pageTitle }}
+      <NextButton
+        v-if="showFilterScope"
+        v-tooltip.right="$t('FILTER.CLEAR_BUTTON_LABEL')"
+        :aria-label="$t('FILTER.CLEAR_BUTTON_LABEL')"
+        icon="i-lucide-chevron-left"
+        class="shrink-0 -ms-2 !h-6 !w-6 me-1"
+        slate
+        sm
+        ghost
+        @click="emit('resetFilters')"
+      />
+      <h1 class="text-base font-medium truncate text-n-slate-12" :title="title">
+        {{ title }}
       </h1>
       <span
         v-if="
@@ -102,43 +126,46 @@ const toggleConversationLayout = () => {
             :class="{ 'ltr:right-0 rtl:left-0': isOnExpandedLayout }"
           />
         </div>
-        <NextButton
-          v-tooltip.top-end="$t('FILTER.CLEAR_BUTTON_LABEL')"
-          icon="i-lucide-circle-x"
-          ruby
-          faded
-          xs
-          @click="emit('resetFilters')"
-        />
       </template>
       <template v-if="hasActiveFolders">
-        <div class="relative">
+        <template v-if="canManageActiveFolder">
+          <div class="relative">
+            <NextButton
+              id="editConversationFilterButton"
+              v-tooltip.top-end="$t('FILTER.CUSTOM_VIEWS.EDIT.EDIT_BUTTON')"
+              icon="i-lucide-pen-line"
+              slate
+              xs
+              faded
+              @click="emit('filtersModal')"
+            />
+            <div
+              id="conversationFilterTeleportTarget"
+              class="absolute z-50 mt-2"
+              :class="{ 'ltr:right-0 rtl:left-0': isOnExpandedLayout }"
+            />
+          </div>
           <NextButton
-            id="toggleConversationFilterButton"
-            v-tooltip.top-end="$t('FILTER.CUSTOM_VIEWS.EDIT.EDIT_BUTTON')"
-            icon="i-lucide-pen-line"
-            slate
+            id="deleteConversationFilterButton"
+            v-tooltip.top-end="$t('FILTER.CUSTOM_VIEWS.DELETE.DELETE_BUTTON')"
+            icon="i-lucide-trash-2"
+            ruby
             xs
             faded
-            @click="emit('filtersModal')"
+            @click="emit('deleteFolders')"
           />
-          <div
-            id="conversationFilterTeleportTarget"
-            class="absolute z-50 mt-2"
-            :class="{ 'ltr:right-0 rtl:left-0': isOnExpandedLayout }"
-          />
-        </div>
+        </template>
         <NextButton
-          id="toggleConversationFilterButton"
-          v-tooltip.top-end="$t('FILTER.CUSTOM_VIEWS.DELETE.DELETE_BUTTON')"
-          icon="i-lucide-trash-2"
-          ruby
+          v-else
+          v-tooltip.top-end="$t('FILTER.CUSTOM_VIEWS.READ_ONLY_TOOLTIP')"
+          :aria-label="$t('FILTER.CUSTOM_VIEWS.READ_ONLY_TOOLTIP')"
+          icon="i-lucide-info"
+          slate
           xs
           faded
-          @click="emit('deleteFolders')"
         />
       </template>
-      <div v-else class="relative">
+      <div v-else-if="!isContactScoped" class="relative">
         <NextButton
           id="toggleConversationFilterButton"
           v-tooltip.right="$t('FILTER.TOOLTIP_LABEL')"
@@ -154,9 +181,17 @@ const toggleConversationLayout = () => {
           :class="{ 'ltr:right-0 rtl:left-0': isOnExpandedLayout }"
         />
       </div>
+      <!--
+        Shown in folders too, where it used to be hidden entirely. The list there was
+        always newest-first and nothing on screen said so, which is the worst version of
+        the problem: a team that works oldest-first had no control and no explanation.
+        The status and group type rows stay hidden there because the folder's own query
+        already decides both.
+      -->
       <ConversationBasicFilter
-        v-if="!hasAppliedFiltersOrActiveFolders"
+        v-if="!isContactScoped"
         :is-on-expanded-layout="isOnExpandedLayout"
+        :show-status-filter="!hasAppliedFiltersOrActiveFolders"
         @change-filter="onBasicFilterChange"
       />
       <SwitchLayout

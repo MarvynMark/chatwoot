@@ -3,15 +3,15 @@ class Api::V2::Accounts::SummaryReportsController < Api::V1::Accounts::BaseContr
   before_action :prepare_builder_params, only: [:agent, :team, :inbox, :label, :channel]
 
   def agent
-    render_report_with(V2::Reports::AgentSummaryBuilder)
+    render_report_with(V2::Reports::AgentSummaryBuilder, type: :agent, filters: { inbox_id: permitted_params[:inbox_id] })
   end
 
   def team
-    render_report_with(V2::Reports::TeamSummaryBuilder)
+    render_report_with(V2::Reports::TeamSummaryBuilder, type: :team)
   end
 
   def inbox
-    render_report_with(V2::Reports::InboxSummaryBuilder)
+    render_report_with(V2::Reports::InboxSummaryBuilder, type: :inbox, filters: { user_id: permitted_params[:user_id] })
   end
 
   def label
@@ -38,13 +38,15 @@ class Api::V2::Accounts::SummaryReportsController < Api::V1::Accounts::BaseContr
     }
   end
 
-  def render_report_with(builder_class)
-    builder = builder_class.new(account: Current.account, params: @builder_params)
+  def render_report_with(builder_class, type: nil, filters: {})
+    builder_params = @builder_params.merge(filters.compact_blank)
+    builder_params = builder_params.merge(type: type) if type.present?
+    builder = builder_class.new(account: Current.account, params: builder_params)
     render json: builder.build
   end
 
   def permitted_params
-    params.permit(:since, :until, :business_hours)
+    params.permit(:since, :until, :business_hours, :inbox_id, :user_id)
   end
 
   def date_range_too_long?

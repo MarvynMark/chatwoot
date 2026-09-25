@@ -16,6 +16,7 @@ import KeyboardEmojiSelector from './keyboardEmojiSelector.vue';
 import TagAgents from '../conversation/TagAgents.vue';
 import TagGroupMembers from '../conversation/TagGroupMembers.vue';
 import VariableList from '../conversation/VariableList.vue';
+import MacroList from '../conversation/MacroList.vue';
 import TagTools from '../conversation/TagTools.vue';
 import TagConversations from '../conversation/TagConversations.vue';
 import CopilotMenuBar from './CopilotMenuBar.vue';
@@ -36,7 +37,6 @@ import {
   CONVERSATION_EVENTS,
   CAPTAIN_EVENTS,
 } from 'dashboard/helper/AnalyticsHelper/events';
-import { MESSAGE_EDITOR_IMAGE_RESIZES } from 'dashboard/constants/editor';
 
 import {
   messageSchema,
@@ -47,6 +47,7 @@ import {
   MessageMarkdownSerializer,
   EditorState,
   Selection,
+  imageResizeView,
 } from '@chatwoot/prosemirror-schema';
 import {
   suggestionsPlugin,
@@ -54,24 +55,28 @@ import {
 } from '@chatwoot/prosemirror-schema/src/mentions/plugin';
 
 import {
+  collapseSelection,
   findNodeToInsertImage,
   getContentNode,
   insertAtCursor,
   scrollCursorIntoView,
-  setURLWithQueryAndSize,
   getFormattingForEditor,
   getSelectionCoords,
   calculateMenuPosition,
   getEffectiveChannelType,
   stripUnsupportedFormatting,
+  createVariableInputRule,
+  releasedSearchTransaction,
 } from 'dashboard/helper/editorHelper';
 import {
   hasPressedEnterAndNotCmdOrShift,
   hasPressedCommandAndEnter,
+  isEscape,
 } from 'shared/helpers/KeyboardHelpers';
 import { createTypingIndicator } from '@chatwoot/utils';
 import { checkFileSizeLimit } from 'shared/helpers/FileHelper';
 import { uploadFile } from 'dashboard/helper/uploadHelper';
+import { INBOX_TYPES } from 'dashboard/helper/inbox';
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -83,8 +88,11 @@ const props = defineProps({
   overrideLineBreaks: { type: Boolean, default: false },
   updateSelectionWith: { type: String, default: '' },
   enableVariables: { type: Boolean, default: false },
+  // Offers the variables only an automation rule can render (`conversation.before.*`).
+  enableAutomationVariables: { type: Boolean, default: false },
   enableCannedResponses: { type: Boolean, default: true },
   enableCaptainTools: { type: Boolean, default: false },
+  enableMacros: { type: Boolean, default: false },
   variables: { type: Object, default: () => ({}) },
   signature: { type: String, default: '' },
   // allowSignature is a kill switch, ensuring no signature methods
@@ -96,7 +104,6 @@ const props = defineProps({
   channelType: { type: String, default: '' },
   conversationId: { type: Number, default: null },
   medium: { type: String, default: '' },
-  showImageResizeToolbar: { type: Boolean, default: false }, // A kill switch to show or hide the image toolbar
   focusOnMount: { type: Boolean, default: true },
   enableCopilot: { type: Boolean, default: true },
   isGroupConversation: { type: Boolean, default: false },
@@ -104,6 +111,10 @@ const props = defineProps({
   inboxPhoneNumber: { type: String, default: null },
   enableMentionDropdown: { type: Boolean, default: false },
   enableConversationMention: { type: Boolean, default: false },
+  // Global INSERT_INTO_RICH_EDITOR bus events (Copilot "Use this", article
+  // links) are meant for the conversation reply editor only — other mounted
+  // editors (canned responses, signature, etc.) must not consume them.
+  enableInsertEvents: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -113,6 +124,8 @@ const emit = defineEmits([
   'toggleCannedMenu',
   'toggleVariablesMenu',
   'toggleToolsMenu',
+  'toggleMacrosMenu',
+  'executeMacro',
   'clearSelection',
   'blur',
   'focus',
@@ -132,6 +145,14 @@ const TYPING_INDICATOR_IDLE_TIME = 4000;
 const MAXIMUM_FILE_UPLOAD_SIZE = 4; // in MB
 const DEFAULT_FORMATTING = 'Context::Default';
 const PRIVATE_NOTE_FORMATTING = 'Context::PrivateNote';
+const MESSAGE_SIGNATURE_FORMATTING = 'Context::MessageSignature';
+const INLINE_IMAGE_PASTE_TYPES = [
+  'image/png',
+  'image/jpeg',
+  'image/jpg',
+  'image/gif',
+  'image/webp',
+];
 
 const effectiveChannelType = computed(() =>
   getEffectiveChannelType(props.channelType, props.medium)
@@ -203,25 +224,34 @@ const showCannedMenu = ref(false);
 const showVariables = ref(false);
 const showEmojiMenu = ref(false);
 const showToolsMenu = ref(false);
-const mentionSearchKey = ref('');
+const showMacroMenu = ref(false);
 const toolSearchKey = ref('');
-const cannedSearchTerm = ref('');
-const variableSearchTerm = ref('');
-const emojiSearchTerm = ref('');
 const showConversationMenu = ref(false);
 const conversationSearchKey = ref('');
+const mentionSearchKey = ref('');
+const cannedSearchKey = ref('');
+const variableSearchKey = ref('');
+const emojiSearchKey = ref('');
+const macroSearchKey = ref('');
 const range = ref(null);
-const isImageNodeSelected = ref(false);
-const toolbarPosition = ref({ top: 0, left: 0 });
-const selectedImageNode = ref(null);
 const isTextSelected = ref(false); // Tracks text selection and prevents unnecessary re-renders on mouse selection
 const showSelectionMenu = ref(false);
-const sizes = MESSAGE_EDITOR_IMAGE_RESIZES;
 
 // element ref
 const editorRoot = useTemplateRef('editorRoot');
 const imageUpload = useTemplateRef('imageUpload');
 const editor = useTemplateRef('editor');
+
+// Anchors the picker to the trigger character, since editors can be much taller than the
+// line being typed on. Offsets are relative to the editor so the picker can sit on that
+// line and track it from there.
+const caretPosition = computed(() => {
+  if (!editorView || !range.value || !editorRoot.value) return null;
+  const from = Math.min(range.value.from, editorView.state.doc.content.size);
+  const { top, bottom } = editorView.coordsAtPos(from);
+  const editorTop = editorRoot.value.getBoundingClientRect().top;
+  return { top: top - editorTop, height: bottom - top };
+});
 
 const isEditorMenuPopover = computed(
   () =>
@@ -257,22 +287,81 @@ const shouldShowCannedResponses = computed(() => {
   );
 });
 
+const shouldShowMacros = computed(() => {
+  return props.enableMacros && showMacroMenu.value;
+});
+
+const shouldShowUserMentions = computed(() => {
+  return (
+    showUserMentions.value &&
+    (props.isPrivate ||
+      props.isGroupConversation ||
+      props.enableMentionDropdown)
+  );
+});
+
+// The picker owns the search field, so it takes focus while open. Dismissing it hands
+// focus back; selecting one does so through the insert itself. The suggestion stays
+// active in the document, so the picker only reopens once the trigger is typed afresh.
+const dismissPicker = showMenu => {
+  showMenu.value = false;
+  editorView?.focus();
+};
+
+const dismissUserMentions = () => dismissPicker(showUserMentions);
+const dismissCannedResponses = () => dismissPicker(showCannedMenu);
+const dismissVariables = () => dismissPicker(showVariables);
+
+// A picker gave up on its search: what was typed in it belongs in the editor, after the trigger
+// that opened it.
+const releasePickerSearch = (showMenu, trigger) => released => {
+  showMenu.value = false;
+  const transaction =
+    editorView &&
+    releasedSearchTransaction(editorView.state, range.value, released, trigger);
+  if (transaction) editorView.dispatch(transaction);
+  editorView?.focus();
+};
+const releaseUserMentions = releasePickerSearch(showUserMentions, '@');
+const releaseCannedResponses = releasePickerSearch(showCannedMenu, '/');
+const releaseVariables = releasePickerSearch(showVariables, '{{');
+const releaseMacros = releasePickerSearch(showMacroMenu, '#');
+const releaseEmojiMenu = releasePickerSearch(showEmojiMenu, ':');
+const dismissEmojiMenu = () => dismissPicker(showEmojiMenu);
+const dismissMacros = () => dismissPicker(showMacroMenu);
+
+// Deleting the trigger drops the suggestion, so the plugin closes the picker through
+// `onExit` on its own.
+const removeSuggestionTrigger = () => {
+  if (!editorView || !range.value) return;
+  const { from, to } = range.value;
+  const end = Math.min(to, editorView.state.doc.content.size);
+  editorView.dispatch(editorView.state.tr.delete(from, end));
+  editorView.focus();
+};
+
+const onSelectMacro = macro => {
+  removeSuggestionTrigger();
+  emit('executeMacro', macro);
+};
+
 function createSuggestionPlugin({
   trigger,
   minChars = 0,
   showMenu,
   searchTerm,
   isAllowed = () => true,
+  interceptEnter = false,
 }) {
   return suggestionsPlugin({
     matcher: triggerCharacters(trigger, minChars),
     suggestionClass: '',
     onEnter: args => {
       if (!isAllowed()) return false;
-      showMenu.value = true;
       range.value = args.range;
       editorView = args.view;
       if (searchTerm) searchTerm.value = args.text || '';
+      showMenu.value = true;
       return false;
     },
     onChange: args => {
@@ -287,7 +376,7 @@ function createSuggestionPlugin({
       return false;
     },
     onKeyDown: ({ event }) => {
-      return event.keyCode === 13 && showMenu.value;
+      return event.keyCode === 13 && showMenu.value && interceptEnter;
     },
   });
 }
@@ -303,6 +392,7 @@ const plugins = computed(() => {
       showMenu: showToolsMenu,
       searchTerm: toolSearchKey,
       isAllowed: () => props.enableCaptainTools,
+      interceptEnter: true,
     }),
     createSuggestionPlugin({
       trigger: '@',
@@ -316,20 +406,30 @@ const plugins = computed(() => {
     createSuggestionPlugin({
       trigger: '/',
       showMenu: showCannedMenu,
-      searchTerm: cannedSearchTerm,
+      searchTerm: cannedSearchKey,
       isAllowed: () => !props.isPrivate,
     }),
     createSuggestionPlugin({
       trigger: '{{',
       showMenu: showVariables,
-      searchTerm: variableSearchTerm,
+      searchTerm: variableSearchKey,
       isAllowed: () => !props.isPrivate,
+    }),
+    createVariableInputRule({
+      isPrivate: () => props.isPrivate,
+      getVariables: () => props.variables,
+    }),
+    createSuggestionPlugin({
+      trigger: '#',
+      showMenu: showMacroMenu,
+      searchTerm: macroSearchKey,
+      isAllowed: () => props.enableMacros,
     }),
     createSuggestionPlugin({
       trigger: ':',
       minChars: 2,
       showMenu: showEmojiMenu,
-      searchTerm: emojiSearchTerm,
+      searchTerm: emojiSearchKey,
     }),
     createSuggestionPlugin({
       trigger: '#',
@@ -375,20 +475,17 @@ const formattedSignature = computed(() => {
   return formatMessage(props.signature, false, false);
 });
 
-watch(showUserMentions, updatedValue => {
-  emit(
-    'toggleUserMention',
-    (props.isPrivate ||
-      props.isGroupConversation ||
-      props.enableMentionDropdown) &&
-      updatedValue
-  );
+watch(shouldShowUserMentions, updatedValue => {
+  emit('toggleUserMention', updatedValue);
 });
-watch(showCannedMenu, updatedValue => {
-  emit('toggleCannedMenu', !props.isPrivate && updatedValue);
+watch(shouldShowCannedResponses, updatedValue => {
+  emit('toggleCannedMenu', updatedValue);
 });
-watch(showVariables, updatedValue => {
-  emit('toggleVariablesMenu', !props.isPrivate && updatedValue);
+watch(shouldShowVariables, updatedValue => {
+  emit('toggleVariablesMenu', updatedValue);
+});
+watch(shouldShowMacros, updatedValue => {
+  emit('toggleMacrosMenu', updatedValue);
 });
 watch(showToolsMenu, updatedValue => {
   emit('toggleToolsMenu', props.enableCaptainTools && updatedValue);
@@ -481,6 +578,14 @@ function handleClickOutside(event) {
 }
 
 function reloadState(content = props.modelValue) {
+  range.value = null;
+  showUserMentions.value = false;
+  showCannedMenu.value = false;
+  showVariables.value = false;
+  showEmojiMenu.value = false;
+  showToolsMenu.value = false;
+  showMacroMenu.value = false;
+
   const unrefContent = unref(content);
   state = createState(
     unrefContent,
@@ -492,16 +597,6 @@ function reloadState(content = props.modelValue) {
 
   editorView.updateState(state);
   focusEditor(unrefContent);
-}
-
-function setToolbarPosition() {
-  const editorRect = editorRoot.value.getBoundingClientRect();
-  const rect = selectedImageNode.value.getBoundingClientRect();
-
-  toolbarPosition.value = {
-    top: `${rect.top - editorRect.top - 30}px`,
-    left: `${rect.left - editorRect.left - 4}px`,
-  };
 }
 
 function setMenubarPosition({ selection } = {}) {
@@ -526,7 +621,9 @@ function setMenubarPosition({ selection } = {}) {
 
 function checkSelection(editorState) {
   showSelectionMenu.value = false;
-  const hasSelection = editorState.selection.from !== editorState.selection.to;
+  const { selection } = editorState;
+  // Skip NodeSelection (from Esc -> selectParentNode); only text ranges count.
+  const hasSelection = !selection.empty && !selection.node;
   if (hasSelection === isTextSelected.value) return;
 
   isTextSelected.value = hasSelection;
@@ -537,48 +634,9 @@ function checkSelection(editorState) {
   if (hasSelection) setMenubarPosition(editorState);
 }
 
-function setURLWithQueryAndImageSize(size) {
-  if (!props.showImageResizeToolbar) {
-    return;
-  }
-  setURLWithQueryAndSize(selectedImageNode.value, size, editorView);
-  isImageNodeSelected.value = false;
-}
-
-function isEditorMouseFocusedOnAnImage() {
-  if (!props.showImageResizeToolbar) {
-    return;
-  }
-  selectedImageNode.value = document.querySelector(
-    'img.ProseMirror-selectednode'
-  );
-  if (selectedImageNode.value) {
-    isImageNodeSelected.value = !!selectedImageNode.value;
-    // Get the position of the selected node
-    setToolbarPosition();
-  } else {
-    isImageNodeSelected.value = false;
-  }
-}
-
 function emitOnChange() {
   emit('input', contentFromEditor());
   emit('update:modelValue', contentFromEditor());
-}
-
-function updateImgToolbarOnDelete() {
-  // check if the selected node is present or not on keyup
-  // this is needed because the user can select an image and then delete it
-  // in that case, the selected node will be null and we need to hide the toolbar
-  // otherwise, the toolbar will be visible even when the image is deleted and cause some errors
-  if (selectedImageNode.value) {
-    const hasImgSelectedNode = document.querySelector(
-      'img.ProseMirror-selectednode'
-    );
-    if (!hasImgSelectedNode) {
-      isImageNodeSelected.value = false;
-    }
-  }
 }
 
 function isEnterToSendEnabled() {
@@ -588,17 +646,6 @@ function isEnterToSendEnabled() {
 function isCmdPlusEnterToSendEnabled() {
   return isEditorHotKeyEnabled('cmd_enter');
 }
-
-useKeyboardEvents({
-  'Alt+KeyP': {
-    action: focusEditorInputField,
-    allowOnFocusedInput: true,
-  },
-  'Alt+KeyL': {
-    action: focusEditorInputField,
-    allowOnFocusedInput: true,
-  },
-});
 
 function onImageInsertInEditor(fileUrl) {
   const { tr } = editorView.state;
@@ -620,7 +667,11 @@ async function uploadImageToStorage(file) {
       onImageInsertInEditor(fileUrl);
     }
     useAlert(
-      t('PROFILE_SETTINGS.FORM.MESSAGE_SIGNATURE_SECTION.IMAGE_UPLOAD_SUCCESS')
+      props.channelType === MESSAGE_SIGNATURE_FORMATTING
+        ? t(
+            'PROFILE_SETTINGS.FORM.MESSAGE_SIGNATURE_SECTION.IMAGE_UPLOAD_SUCCESS'
+          )
+        : t('CONVERSATION.REPLYBOX.IMAGE_UPLOAD_SUCCESS')
     );
   } catch (error) {
     useAlert(
@@ -629,8 +680,8 @@ async function uploadImageToStorage(file) {
   }
 }
 
-function onFileChange() {
-  const file = imageUpload.value.files[0];
+function uploadImageIfWithinSizeLimit(file) {
+  if (!file) return;
   if (checkFileSizeLimit(file, MAXIMUM_FILE_UPLOAD_SIZE)) {
     uploadImageToStorage(file);
   } else {
@@ -643,9 +694,60 @@ function onFileChange() {
       )
     );
   }
-
-  imageUpload.value = '';
 }
+
+function onFileChange() {
+  const input = imageUpload.value;
+  uploadImageIfWithinSizeLimit(input.files[0]);
+  input.value = '';
+}
+
+const allowsInlineImagePaste = computed(
+  () =>
+    !props.isPrivate &&
+    (props.channelType === INBOX_TYPES.EMAIL ||
+      props.channelType === INBOX_TYPES.WEB)
+);
+
+// Shift+Cmd/Ctrl+V on email/website: upload a clipboard image inline. This
+// gesture's native paste event carries no image, so clipboard.read() is the
+// only way to get the bytes. No preventDefault: text still pastes natively.
+async function pasteInlineImageFromClipboard() {
+  if (!editorView?.hasFocus()) return;
+  if (!allowsInlineImagePaste.value || !navigator.clipboard?.read) return;
+  try {
+    const items = await navigator.clipboard.read();
+    const imageItem = items.find(item =>
+      item.types.some(type => INLINE_IMAGE_PASTE_TYPES.includes(type))
+    );
+    if (!imageItem) return;
+    const imageType = imageItem.types.find(type =>
+      INLINE_IMAGE_PASTE_TYPES.includes(type)
+    );
+    const blob = await imageItem.getType(imageType);
+    uploadImageIfWithinSizeLimit(
+      new File([blob], 'pasted-image', { type: imageType })
+    );
+  } catch (error) {
+    // clipboard-read denied/unfocused (NotAllowedError): image can't be read.
+    // Text paste is unaffected — ProseMirror handles it from the native event.
+  }
+}
+
+useKeyboardEvents({
+  'Alt+KeyP': {
+    action: focusEditorInputField,
+    allowOnFocusedInput: false,
+  },
+  'Alt+KeyL': {
+    action: focusEditorInputField,
+    allowOnFocusedInput: false,
+  },
+  '$mod+Shift+KeyV': {
+    action: pasteInlineImageFromClipboard,
+    allowOnFocusedInput: true,
+  },
+});
 
 function handleLineBreakWhenEnterToSendEnabled(event) {
   if (
@@ -722,18 +824,27 @@ function handleLineBreakWhenCmdAndEnterToSendEnabled(event) {
 }
 
 function onKeydown(event) {
+  if (isEscape(event)) {
+    collapseSelection(editorView);
+    return true;
+  }
   if (isEnterToSendEnabled()) {
     handleLineBreakWhenEnterToSendEnabled(event);
   }
   if (isCmdPlusEnterToSendEnabled()) {
     handleLineBreakWhenCmdAndEnterToSendEnabled(event);
   }
+  return false;
 }
 
 function createEditorView() {
   editorView = new EditorView(editor.value, {
     state: state,
     editable: () => !props.disabled,
+    attributes: { class: 'resizable-editor-body' },
+    nodeViews: {
+      image: imageResizeView,
+    },
     dispatchTransaction: tx => {
       state = state.apply(tx);
       editorView.updateState(state);
@@ -750,15 +861,16 @@ function createEditorView() {
           } else {
             typingIndicator.stop();
           }
-          updateImgToolbarOnDelete();
         }
       },
       keydown: (view, event) => !props.disabled && onKeydown(event),
       focus: () => !props.disabled && emit('focus'),
-      click: () => !props.disabled && isEditorMouseFocusedOnAnImage(),
       blur: () => {
         if (props.disabled) return;
         typingIndicator.stop();
+        // PM keeps its selection on blur — clear the menu flags manually.
+        isTextSelected.value = false;
+        editorRoot.value?.classList.remove('has-selection');
         emit('blur');
       },
       paste: (view, event) => {
@@ -791,10 +903,6 @@ watch(
 watch(
   computed(() => props.editorId),
   () => {
-    showCannedMenu.value = false;
-    showEmojiMenu.value = false;
-    showVariables.value = false;
-    cannedSearchTerm.value = '';
     reloadState(props.modelValue);
   }
 );
@@ -804,6 +912,11 @@ watch(
   () => {
     reloadState(props.modelValue);
   }
+);
+
+watch(
+  computed(() => props.disabled),
+  () => editorView?.setProps({})
 );
 
 watch(
@@ -847,7 +960,10 @@ onMounted(() => {
 // current cursor position.
 // Components using this
 // 1. SearchPopover.vue
-useEmitter(BUS_EVENTS.INSERT_INTO_RICH_EDITOR, insertContentIntoEditor);
+useEmitter(BUS_EVENTS.INSERT_INTO_RICH_EDITOR, content => {
+  if (!props.enableInsertEvents) return;
+  insertContentIntoEditor(content);
+});
 
 function insertMentionTrigger(char) {
   if (!editorView) return;
@@ -883,23 +999,52 @@ defineExpose({ focusEditorInputField, insertMentionTrigger });
     />
     <TagAgents
       v-if="showUserMentions && (isPrivate || enableMentionDropdown)"
+      :caret-position="caretPosition"
       :search-key="mentionSearchKey"
       :exclude-user-id="enableMentionDropdown ? currentUser?.id : null"
+      @close="dismissUserMentions"
+      @release="releaseUserMentions"
+      @remove-trigger="removeSuggestionTrigger"
       @select-agent="content => insertSpecialContent('mention', content)"
     />
     <CannedResponse
       v-if="shouldShowCannedResponses"
-      :search-key="cannedSearchTerm"
+      :caret-position="caretPosition"
+      :search-key="cannedSearchKey"
+      :variables="variables"
+      :schema="editorSchema"
+      @close="dismissCannedResponses"
+      @release="releaseCannedResponses"
+      @remove-trigger="removeSuggestionTrigger"
       @replace="content => insertSpecialContent('cannedResponse', content)"
     />
     <VariableList
       v-if="shouldShowVariables"
-      :search-key="variableSearchTerm"
+      :caret-position="caretPosition"
+      :search-key="variableSearchKey"
+      :variables="variables"
+      :automation="enableAutomationVariables"
+      @close="dismissVariables"
+      @release="releaseVariables"
+      @remove-trigger="removeSuggestionTrigger"
       @select-variable="content => insertSpecialContent('variable', content)"
+    />
+    <MacroList
+      v-if="shouldShowMacros"
+      :caret-position="caretPosition"
+      :search-key="macroSearchKey"
+      @close="dismissMacros"
+      @release="releaseMacros"
+      @remove-trigger="removeSuggestionTrigger"
+      @select-macro="onSelectMacro"
     />
     <KeyboardEmojiSelector
       v-if="showEmojiMenu"
-      :search-key="emojiSearchTerm"
+      :caret-position="caretPosition"
+      :search-key="emojiSearchKey"
+      @close="dismissEmojiMenu"
+      @release="releaseEmojiMenu"
+      @remove-trigger="removeSuggestionTrigger"
       @select-emoji="emoji => insertSpecialContent('emoji', emoji)"
     />
     <TagTools
@@ -917,7 +1062,7 @@ defineExpose({ focusEditorInputField, insertMentionTrigger });
       v-on-click-outside="handleClickOutside"
       :has-selection="isTextSelected"
       :is-editor-menu-popover="isEditorMenuPopover"
-      :editor-content="modelValue"
+      :has-content="!isBodyEmpty(modelValue)"
       :conversation-id="conversationId"
       :show-selection-menu="showSelectionMenu"
       :show-general-menu="false"
@@ -959,23 +1104,6 @@ defineExpose({ focusEditorInputField, insertMentionTrigger });
         {{ signatureSeparator }}
       </div>
       <div v-dompurify-html="formattedSignature" class="signature-content" />
-    </div>
-    <div
-      v-show="isImageNodeSelected && showImageResizeToolbar"
-      class="absolute shadow-md rounded-[6px] flex gap-1 py-1 px-1 bg-n-solid-3 outline outline-1 outline-n-weak text-n-slate-12"
-      :style="{
-        top: toolbarPosition.top,
-        left: toolbarPosition.left,
-      }"
-    >
-      <button
-        v-for="size in sizes"
-        :key="size.name"
-        class="text-xs font-medium rounded-[4px] outline outline-1 outline-n-strong px-1.5 py-0.5 hover:bg-n-slate-5"
-        @click="setURLWithQueryAndImageSize(size)"
-      >
-        {{ size.name }}
-      </button>
     </div>
     <slot name="footer" />
   </div>
@@ -1075,10 +1203,6 @@ defineExpose({ focusEditorInputField, insertMentionTrigger });
         @apply text-n-slate-11;
       }
     }
-
-    ol li {
-      @apply list-item list-decimal;
-    }
   }
 }
 
@@ -1087,28 +1211,9 @@ defineExpose({ focusEditorInputField, insertMentionTrigger });
 }
 
 .ProseMirror-woot-style:not(
-    :where(.resizable-editor-wrapper .ProseMirror-woot-style)
+    :where(.resizable-editor-wrapper .resizable-editor-body)
   ) {
   @apply min-h-[5rem] max-h-[7.5rem];
-}
-
-// Resizable editor wrapper styles
-.resizable-editor-wrapper {
-  .ProseMirror-woot-style {
-    min-height: clamp(
-      var(--editor-min-allowed, var(--editor-min-height, 5rem)),
-      var(--editor-height, var(--editor-min-height, 5rem)),
-      var(--editor-max-allowed, var(--editor-max-height, 7.5rem))
-    );
-    max-height: clamp(
-      var(--editor-min-allowed, var(--editor-min-height, 5rem)),
-      var(--editor-height, var(--editor-min-height, 5rem)),
-      var(--editor-max-allowed, var(--editor-max-height, 7.5rem))
-    );
-    transition:
-      min-height var(--editor-height-transition, 180ms ease),
-      max-height var(--editor-height-transition, 180ms ease);
-  }
 }
 
 .ProseMirror-prompt-backdrop::backdrop {

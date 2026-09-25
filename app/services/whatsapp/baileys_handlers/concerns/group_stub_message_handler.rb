@@ -52,8 +52,8 @@ module Whatsapp::BaileysHandlers::Concerns::GroupStubMessageHandler # rubocop:di
       ).perform
 
       group_contact = group_contact_inbox.contact
-      was_group_left = group_contact.additional_attributes&.dig('group_left').present?
-      reset_group_left_flag(group_contact)
+      was_group_left = group_contact_inbox.group_left?
+      group_contact_inbox.mark_group_rejoined!
       find_or_create_group_conversation(group_contact_inbox)
       handle_group_rejoin(group_contact) if was_group_left
       enqueue_group_sync(group_contact, force: was_group_left)
@@ -81,20 +81,8 @@ module Whatsapp::BaileysHandlers::Concerns::GroupStubMessageHandler # rubocop:di
     add_group_member(group_contact, contact)
   end
 
-  def reset_group_left_flag(group_contact)
-    return unless group_contact.additional_attributes&.dig('group_left')
-
-    new_attrs = (group_contact.additional_attributes || {}).merge('group_left' => false)
-    group_contact.update!(additional_attributes: new_attrs)
-  end
-
   def update_group_avatar(group_contact)
-    provider = group_contact.group_channel&.provider_service
-    return if provider.blank?
-
-    provider.try_update_group_avatar(group_contact, force: true)
-  rescue StandardError => e
-    Rails.logger.error "[GROUP_ICON] Failed to update avatar for #{group_contact.identifier}: #{e.message}"
+    Channels::Whatsapp::BaileysUpdateGroupAvatarJob.perform_later(group_contact, force: true)
   end
 
   def parse_membership_request_action(stub_params)

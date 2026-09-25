@@ -1,3 +1,5 @@
+<!-- DEPRECIATED -->
+<!-- TODO: Replace this banner component with NextBanner "app/javascript/dashboard/components-next/banner/Banner.vue" -->
 <script>
 import NextButton from 'dashboard/components-next/button/Button.vue';
 
@@ -41,6 +43,10 @@ export default {
     hasCloseButton: {
       type: Boolean,
       default: false,
+    },
+    noticeMessage: {
+      type: String,
+      default: '',
     },
   },
   emits: ['primaryAction', 'close'],
@@ -92,6 +98,9 @@ export default {
       >
         {{ hrefLinkText }}
       </a>
+      <span v-if="noticeMessage" class="banner-notice">
+        {{ noticeMessage }}
+      </span>
     </span>
     <div class="actions">
       <NextButton
@@ -106,6 +115,7 @@ export default {
       <NextButton
         v-if="hasCloseButton"
         xs
+        variant="ghost"
         icon="i-lucide-circle-x"
         :color="getButtonColor"
         :label="$t('GENERAL_SETTINGS.DISMISS')"
@@ -153,6 +163,10 @@ export default {
 
   .banner-message {
     @apply inline;
+  }
+
+  .banner-notice {
+    @apply ml-2 italic opacity-70;
   }
 
   .actions {

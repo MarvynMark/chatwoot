@@ -172,6 +172,20 @@ describe('#mutations', () => {
       expect(emitter.emit).toHaveBeenCalledWith('SCROLL_TO_MESSAGE');
     });
 
+    it('skips SCROLL_TO_MESSAGE when the new message is a reaction', () => {
+      const state = {
+        allConversations: [{ id: 1, messages: [] }],
+        selectedChatId: 1,
+      };
+      mutations[types.ADD_MESSAGE](state, {
+        conversation_id: 1,
+        content: '👍',
+        created_at: 1602256198,
+        content_attributes: { is_reaction: true, in_reply_to: 42 },
+      });
+      expect(emitter.emit).not.toHaveBeenCalled();
+    });
+
     it('update message if it exist in the store', () => {
       global.bus = { $emit: vi.fn() };
       const state = {
@@ -207,6 +221,66 @@ describe('#mutations', () => {
         },
       ]);
       expect(emitter.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('#UPDATE_CONVERSATION', () => {
+    it('emits SCROLL_TO_MESSAGE when the open conversation gets a regular update', () => {
+      const state = {
+        allConversations: [
+          { id: 1, updated_at: 1, last_non_activity_message: null },
+        ],
+        selectedChatId: 1,
+      };
+      mutations[types.UPDATE_CONVERSATION](state, {
+        id: 1,
+        updated_at: 2,
+        last_non_activity_message: {
+          id: 99,
+          content: 'Hello',
+          content_attributes: {},
+        },
+      });
+      expect(emitter.emit).toHaveBeenCalledWith('SCROLL_TO_MESSAGE');
+    });
+
+    it('skips SCROLL_TO_MESSAGE when the broadcast is tagged as a reaction toggle', () => {
+      const state = {
+        allConversations: [
+          { id: 1, updated_at: 1, last_non_activity_message: null },
+        ],
+        selectedChatId: 1,
+      };
+      // Newer non-reaction messages exist after the reacted target, so
+      // `last_non_activity_message` is a regular message — the explicit
+      // metadata is what tells us this update is preview-only.
+      mutations[types.UPDATE_CONVERSATION](state, {
+        id: 1,
+        updated_at: 2,
+        last_non_activity_message: {
+          id: 256,
+          content: 'Hello',
+          content_attributes: {},
+        },
+        event_metadata: { source: 'reaction_toggle' },
+      });
+      expect(emitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('does not persist the event_metadata field onto the cached conversation', () => {
+      const state = {
+        allConversations: [
+          { id: 1, updated_at: 1, last_non_activity_message: null },
+        ],
+        selectedChatId: 1,
+      };
+      mutations[types.UPDATE_CONVERSATION](state, {
+        id: 1,
+        updated_at: 2,
+        last_non_activity_message: null,
+        event_metadata: { source: 'reaction_toggle' },
+      });
+      expect(state.allConversations[0]).not.toHaveProperty('event_metadata');
     });
   });
 
@@ -298,7 +372,7 @@ describe('#mutations', () => {
       expect(state.allConversations).toEqual(data);
     });
 
-    it('set all conversation in reconnect if selected chat id and conversation id is the same', () => {
+    it('updates the selected conversation on reconnect without emitting a scroll event', () => {
       const state = {
         allConversations: [{ id: 1, status: 'open' }],
         selectedChatId: 1,
@@ -306,6 +380,7 @@ describe('#mutations', () => {
       const data = [{ id: 1, name: 'test', status: 'resolved' }];
       mutations[types.SET_ALL_CONVERSATION](state, data);
       expect(state.allConversations).toEqual(data);
+      expect(emitter.emit).not.toHaveBeenCalled();
     });
 
     it('set all conversation in reconnect if selected chat id and conversation id is the same then do not update messages, attachments, dataFetched, allMessagesLoaded', () => {
@@ -652,6 +727,34 @@ describe('#mutations', () => {
   });
 
   describe('#SET_PREVIOUS_CONVERSATIONS', () => {
+    it('merges overlapping history once while preserving newer realtime message data', () => {
+      const realtimeMessage = {
+        id: 2,
+        content: 'Updated content',
+        status: 'read',
+      };
+      const state = {
+        allConversations: [{ id: 1, messages: [realtimeMessage, { id: 3 }] }],
+      };
+      const payload = {
+        id: 1,
+        data: [
+          { id: 1 },
+          { id: 1 },
+          { id: 2, content: 'Old content', status: 'sent' },
+        ],
+      };
+
+      mutations[types.SET_PREVIOUS_CONVERSATIONS](state, payload);
+      mutations[types.SET_PREVIOUS_CONVERSATIONS](state, payload);
+
+      expect(state.allConversations[0].messages).toEqual([
+        { id: 1 },
+        realtimeMessage,
+        { id: 3 },
+      ]);
+    });
+
     it('should prepend messages to conversation messages array', () => {
       const state = {
         allConversations: [{ id: 1, messages: [{ id: 'msg2' }] }],
@@ -712,9 +815,53 @@ describe('#mutations', () => {
       mutations[types.ASSIGN_AGENT](state, {
         conversationId: 1,
         assignee,
+        assigneeType: 'AgentBot',
       });
       expect(state.allConversations[0].meta.assignee).toEqual(assignee);
+      expect(state.allConversations[0].meta.assignee_type).toEqual('AgentBot');
       expect(state.allConversations[1].meta.assignee).toBeUndefined();
+    });
+
+    it('should update assignee type when provided', () => {
+      const assignee = { id: 1, name: 'Agent' };
+      const state = {
+        allConversations: [{ id: 1, meta: { assignee_type: 'AgentBot' } }],
+      };
+
+      mutations[types.ASSIGN_AGENT](state, {
+        conversationId: 1,
+        assignee,
+        assigneeType: 'User',
+      });
+
+      expect(state.allConversations[0].meta.assignee_type).toEqual('User');
+    });
+
+    it('should infer user assignee type when assignee type is omitted', () => {
+      const assignee = { id: 1, name: 'Agent' };
+      const state = {
+        allConversations: [{ id: 1, meta: { assignee_type: 'AgentBot' } }],
+      };
+
+      mutations[types.ASSIGN_AGENT](state, {
+        conversationId: 1,
+        assignee,
+      });
+
+      expect(state.allConversations[0].meta.assignee_type).toEqual('User');
+    });
+
+    it('should clear assignee type when assignee type and assignee are omitted', () => {
+      const state = {
+        allConversations: [{ id: 1, meta: { assignee_type: 'AgentBot' } }],
+      };
+
+      mutations[types.ASSIGN_AGENT](state, {
+        conversationId: 1,
+        assignee: null,
+      });
+
+      expect(state.allConversations[0].meta.assignee_type).toBeNull();
     });
   });
 

@@ -6,6 +6,8 @@ import {
   useStore,
 } from 'dashboard/composables/store';
 import { useAccount } from 'dashboard/composables/useAccount';
+import { useInbox } from 'dashboard/composables/useInbox';
+import { CAPABILITIES } from 'dashboard/helper/whatsappSession';
 import { useUISettings } from 'dashboard/composables/useUISettings';
 import { FEATURE_FLAGS } from 'dashboard/featureFlags';
 
@@ -19,6 +21,7 @@ import ContactNotes from './contact/ContactNotes.vue';
 import ScheduledMessages from './scheduledMessages/ScheduledMessages.vue';
 import ConversationInfo from './ConversationInfo.vue';
 import CustomAttributes from './customAttributes/CustomAttributes.vue';
+import SharedFiles from './SharedFiles.vue';
 import Draggable from 'vuedraggable';
 import MacrosList from './Macros/List.vue';
 import ShopifyOrdersList from 'dashboard/components/widgets/conversation/ShopifyOrdersList.vue';
@@ -42,6 +45,7 @@ const {
   isContactSidebarItemOpen,
   conversationSidebarItemsOrder,
   toggleSidebarUIState,
+  isOnExpandedLayout,
 } = useUISettings();
 
 const dragging = ref(false);
@@ -89,8 +93,23 @@ const conversationAdditionalAttributes = computed(
 );
 
 const channelType = computed(() => currentChat.value.meta?.channel);
+const { hasInboxCapability } = useInbox();
 const isGroupConversation = computed(
   () => currentChat.value.group_type === 'group'
+);
+// A group thread whose provider cannot answer for groups has no member list to show and
+// no sync to run: asking anyway is a request that fails behind the panel.
+// A group thread is a group thread whatever the provider can do about it, so the panel
+// follows the conversation. Gating it on the capability sent group conversations to the
+// generic contact panel instead, which offers rename, merge, delete and compose against
+// the synthetic group contact. What the capability governs is inside the panel: the member
+// sync below, and the write actions in GroupContactInfo.
+const showGroupInfo = isGroupConversation;
+// Everything this gates is a command against the provider -- syncing the roster, leaving,
+// the settings panel -- so it asks for `group_management`, not for group conversations
+// reaching the inbox.
+const supportsGroups = computed(() =>
+  hasInboxCapability(CAPABILITIES.GROUP_MANAGEMENT)
 );
 const sidebarTitle = computed(() =>
   isGroupConversation.value
@@ -105,6 +124,14 @@ const contactAdditionalAttributes = computed(
   () => contact.value.additional_attributes || {}
 );
 
+const appliedContactFilter = useMapGetter('getAppliedContactFilter');
+
+const isListScopedToContact = computed(
+  () =>
+    !isOnExpandedLayout.value &&
+    appliedContactFilter.value?.id === contactId.value
+);
+
 const getContactDetails = () => {
   if (contactId.value) {
     store.dispatch('contacts/show', { id: contactId.value });
@@ -112,8 +139,11 @@ const getContactDetails = () => {
 };
 
 const triggerGroupSync = () => {
-  if (isGroupConversation.value && contactId.value) {
-    store.dispatch('groupMembers/sync', { contactId: contactId.value });
+  if (showGroupInfo.value && supportsGroups.value && contactId.value) {
+    store.dispatch('groupMembers/sync', {
+      contactId: contactId.value,
+      inboxId: props.inboxId,
+    });
   }
 };
 
@@ -122,6 +152,13 @@ watch(contactId, (newContactId, prevContactId) => {
     getContactDetails();
     triggerGroupSync();
   }
+});
+
+// Same reason as the group-member watchers: the inbox carrying the capability can arrive
+// after this mounts, and `triggerGroupSync` reads it. Without this the panel rendered for a
+// group thread whose members were never synced.
+watch(supportsGroups, supported => {
+  if (supported) triggerGroupSync();
 });
 
 const onDragEnd = () => {
@@ -154,7 +191,7 @@ onMounted(() => {
       :title="$t(sidebarTitle)"
       @close="closeContactPanel"
     />
-    <GroupContactInfo v-if="isGroupConversation" :contact="contact" />
+    <GroupContactInfo v-if="showGroupInfo" :contact="contact" />
     <ContactInfo v-else :contact="contact" :channel-type="channelType" />
     <div class="px-2 pb-8 list-group">
       <Draggable
@@ -257,7 +294,11 @@ onMounted(() => {
               />
             </AccordionItem>
           </div>
-          <div v-else-if="element.name === 'previous_conversation'">
+          <div
+            v-else-if="
+              element.name === 'previous_conversation' && !isListScopedToContact
+            "
+          >
             <AccordionItem
               v-if="contact.id"
               :title="
@@ -335,6 +376,18 @@ onMounted(() => {
               <ContactNotes :contact-id="contactId" />
             </AccordionItem>
           </div>
+          <div v-else-if="element.name === 'shared_files'">
+            <AccordionItem
+              :title="$t('CONVERSATION_SIDEBAR.ACCORDION.SHARED_FILES')"
+              :is-open="isContactSidebarItemOpen('is_shared_files_open')"
+              compact
+              @toggle="
+                value => toggleSidebarUIState('is_shared_files_open', value)
+              "
+            >
+              <SharedFiles />
+            </AccordionItem>
+          </div>
         </template>
       </Draggable>
     </div>
@@ -342,9 +395,7 @@ onMounted(() => {
 </template>
 
 <style lang="scss" scoped>
-::v-deep {
-  .contact--profile {
-    @apply pb-3 border-b border-solid border-n-weak;
-  }
+:deep(.contact--profile) {
+  @apply pb-3 border-b border-solid border-n-weak;
 }
 </style>
