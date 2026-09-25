@@ -47,5 +47,5 @@ jobs:
       - name: Trigger Coolify deploy
         run: |
           curl -s -o /dev/null -w "%{http_code}" \
-            -X GET "https://coolify.softaxon.tech/api/v1/deploy?uuid=m7lxzl1kt07lcsgdq1t9828q&force=false" \
+            -X GET "https://coolify.softaxon.tech/api/v1/deploy?uuid=w1yo7jhrw4n91jzyyw33r0xz&force=false" \
             -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}"
